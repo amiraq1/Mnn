@@ -5,7 +5,8 @@ node_modules/
 
 # Expo
 .expo/
-dist/
+dist/*
+!dist/SHA256SUMS.txt
 web-build/
 expo-env.d.ts
 
@@ -40,7 +41,11 @@ app-example
 
 # generated native folders
 /ios
-/android
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/local.properties
 
 # IDE
 .vscode/

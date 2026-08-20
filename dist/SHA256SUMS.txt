@@ -1,0 +1,1 @@
+ccd9859a5ca7e69c30d7ded4d6984003b7edace3e9fe8591bae8bacd7e45322a  MNN-Local-AI-1.0.0-arm64.apk
