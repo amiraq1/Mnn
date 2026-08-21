@@ -58,7 +58,7 @@ export default function HomeScreen() {
     const subscriptions = [
       mnnLocalAi.onDownloadProgress((event) => {
         setProgress(event);
-        setStatus((current) => ({ ...current, state: event.phase === "verifying" ? "verifying" : "downloading", downloadedBytes: event.downloadedBytes, totalBytes: event.totalBytes }));
+        setStatus((current) => ({ ...current, state: event.phase, downloadedBytes: event.downloadedBytes, totalBytes: event.totalBytes, message: event.phase === "paused" ? "تم إيقاف التنزيل مؤقتًا. يمكنك استئنافه من آخر بايت محفوظ." : undefined }));
       }),
       mnnLocalAi.onDownloadCompleted(() => {
         setProgress(null);
@@ -166,6 +166,25 @@ export default function HomeScreen() {
     mnnLocalAi.startRecommendedGgufDownload(model.id);
   }
 
+  function pauseDownload() {
+    try {
+      setStatus((current) => ({ ...current, message: "يجري إيقاف نقل الملف بعد حفظ البيانات المستلمة…" }));
+      mnnLocalAi.pauseModelDownload();
+    } catch (error) {
+      setStatus((current) => ({ ...current, state: "failed", message: error instanceof Error ? error.message : "تعذر إيقاف التنزيل مؤقتًا" }));
+    }
+  }
+
+  function resumeDownload() {
+    try {
+      setProgress((current) => current ? { ...current, phase: "downloading", speedBytesPerSecond: 0, etaSeconds: -1 } : current);
+      setStatus((current) => ({ ...current, state: "downloading", message: "يجري استئناف التنزيل من آخر بايت محفوظ…" }));
+      mnnLocalAi.resumeModelDownload();
+    } catch (error) {
+      setStatus((current) => ({ ...current, state: "failed", message: error instanceof Error ? error.message : "تعذر استئناف التنزيل" }));
+    }
+  }
+
   async function sendMessage() {
     const prompt = input.trim();
     if (!prompt || status.state !== "ready" || isGenerating) return;
@@ -216,7 +235,11 @@ export default function HomeScreen() {
             <PrimaryButton label="بدء محادثة" onPress={() => setChatStarted(true)} />
           ) : status.state === "missing" || status.state === "failed" ? (
             <View style={{ width: "100%", gap: 10 }}><PrimaryButton label={status.state === "failed" ? "إعادة محاولة تنزيل MNN" : "تنزيل نموذج MNN المدمج"} onPress={startDownload} /><Pressable accessibilityRole="button" accessibilityLabel="فتح كتالوج نماذج GGUF" onPress={() => setShowCatalog(true)} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>استعراض نماذج GGUF الموصى بها</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="استيراد نموذج GGUF" disabled={isImporting} onPress={() => void importGguf()} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed, isImporting && { opacity: 0.6 }]}><Text style={detailStyles.secondaryButtonText}>{isImporting ? "يجري استيراد GGUF" : "استيراد ملف GGUF من الجهاز"}</Text></Pressable></View>
-          ) : status.state === "downloading" || status.state === "verifying" || status.state === "loading" || status.state === "warming" ? (
+          ) : status.state === "downloading" ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="إيقاف التنزيل مؤقتًا" onPress={pauseDownload} style={({ pressed }) => [styles.pauseButton, pressed && styles.pressed]}><Text style={styles.pauseButtonText}>إيقاف التنزيل مؤقتًا</Text></Pressable>
+          ) : status.state === "paused" ? (
+            <PrimaryButton label="استئناف التنزيل" onPress={resumeDownload} />
+          ) : status.state === "verifying" || status.state === "loading" || status.state === "warming" ? (
             <View style={styles.pendingButton}><ActivityIndicator color="#FFFFFF" /><Text style={styles.pendingButtonText}>يجري تجهيز النموذج</Text></View>
           ) : null}
           {status.state === "failed" ? <Text style={styles.errorText}>{status.message}</Text> : null}
@@ -252,8 +275,9 @@ export default function HomeScreen() {
 }
 
 function StatusPanel({ status, progress, percent }: { status: ModelStatus; progress: NativeDownloadProgress | null; percent: number }) {
-  const label = status.state === "downloading" ? "يجري تنزيل النموذج" : status.state === "verifying" ? "يجري التحقق من الملف" : status.state === "loading" ? "يجري تحميل الأوزان" : status.state === "warming" ? "يجري warm-up" : "النموذج غير محمّل";
-  return <View style={styles.statusPanel}><View style={styles.statusRow}><Text style={styles.statusLabel}>{label}</Text><Text style={styles.statusValue}>{percent}%</Text></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${percent}%` }]} /></View><Text style={styles.statusDetails}>{progress ? `${progress.currentFile} · ${formatBytes(progress.downloadedBytes)} من ${formatBytes(progress.totalBytes)}` : status.message ?? "يمكن استئناف التنزيل من آخر بايت مكتمل."}</Text></View>;
+  const label = status.state === "downloading" ? "يجري تنزيل النموذج" : status.state === "paused" ? "تم إيقاف التنزيل مؤقتًا" : status.state === "verifying" ? "يجري التحقق من الملف" : status.state === "loading" ? "يجري تحميل الأوزان" : status.state === "warming" ? "يجري warm-up" : "النموذج غير محمّل";
+  const hasLiveTransfer = progress?.phase === "downloading";
+  return <View style={styles.statusPanel}><View style={styles.statusRow}><Text style={styles.statusLabel}>{label}</Text><Text style={styles.statusValue}>{percent}%</Text></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${percent}%` }]} /></View><Text style={styles.statusDetails}>{progress ? `${progress.currentFile || "الملف الجاري"} · ${formatBytes(progress.downloadedBytes)} من ${formatBytes(progress.totalBytes)}` : status.message ?? "يمكن استئناف التنزيل من آخر بايت مكتمل."}</Text>{hasLiveTransfer ? <View style={styles.transferRow}><Text style={styles.transferMetric}>المتبقي: {formatRemainingTime(progress.etaSeconds)}</Text><Text style={styles.transferMetric}>السرعة: {formatDownloadSpeed(progress.speedBytesPerSecond)}</Text></View> : null}</View>;
 }
 
 function MessageBubble({ message }: { message: ChatMessage }) {
@@ -274,6 +298,19 @@ function ModelCatalogSheet({ visible, models, onClose, onSelect }: { visible: bo
 
 function formatKilobytes(value?: number) {
   return value && value > 0 ? `${(value / 1024).toFixed(1)} MB` : "غير متاح بعد";
+}
+
+function formatDownloadSpeed(bytesPerSecond: number) {
+  return bytesPerSecond > 0 ? `${formatBytes(bytesPerSecond)}/ث` : "يُحسب…";
+}
+
+function formatRemainingTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "يُحسب…";
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} ث`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} د`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.ceil((seconds % 3600) / 60);
+  return `${hours} س ${minutes} د`;
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -316,5 +353,5 @@ const detailStyles = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
-  setupLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18 }, noticeLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, paddingHorizontal: 24 }, logoMark: { width: 88, height: 88, borderRadius: 28, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", shadowColor: "#0B5FFF", shadowOpacity: 0.25, shadowRadius: 20, elevation: 7 }, logoGlyph: { color: "#FFFFFF", fontSize: 46, lineHeight: 56 }, title: { fontSize: 30, fontWeight: "800", color: "#152033", textAlign: "center" }, subtitle: { color: "#58657D", fontSize: 16, lineHeight: 24, textAlign: "center", maxWidth: 350 }, specCard: { width: "100%", borderRadius: 20, backgroundColor: "#FFFFFF", borderColor: "#DFE7F5", borderWidth: 1, padding: 18, gap: 7 }, specTitle: { color: "#152033", fontSize: 16, fontWeight: "700", textAlign: "right" }, specText: { color: "#58657D", fontSize: 13, lineHeight: 19, textAlign: "right" }, statusPanel: { width: "100%", padding: 16, borderRadius: 18, backgroundColor: "#ECF2FF", gap: 10 }, statusRow: { flexDirection: "row-reverse", justifyContent: "space-between" }, statusLabel: { color: "#22314D", fontWeight: "700" }, statusValue: { color: "#0B5FFF", fontWeight: "800" }, progressTrack: { backgroundColor: "#CDD9F4", height: 8, borderRadius: 4, overflow: "hidden" }, progressFill: { height: "100%", borderRadius: 4, backgroundColor: "#0B5FFF" }, statusDetails: { color: "#58657D", fontSize: 12, textAlign: "right" }, primaryButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, primaryButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, pendingButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#577DCB", flexDirection: "row-reverse", gap: 10, alignItems: "center", justifyContent: "center" }, pendingButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, errorText: { color: "#C62828", textAlign: "center", fontSize: 13, lineHeight: 20 }, header: { paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#F7F9FC", borderBottomColor: "#E1E8F2", borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center" }, headerTitle: { color: "#152033", fontSize: 18, fontWeight: "800", textAlign: "right" }, headerStatus: { color: "#16794B", fontSize: 12, marginTop: 3, textAlign: "right" }, headerAction: { paddingHorizontal: 13, paddingVertical: 9, borderRadius: 12, backgroundColor: "#E7EEFC" }, headerActionText: { color: "#0B5FFF", fontWeight: "700", fontSize: 13 }, messageList: { padding: 16, gap: 10 }, messageRow: { flexDirection: "row", width: "100%" }, userRow: { justifyContent: "flex-end" }, assistantRow: { justifyContent: "flex-start" }, messageBubble: { maxWidth: "84%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 11 }, userBubble: { backgroundColor: "#0B5FFF", borderBottomRightRadius: 4 }, assistantBubble: { backgroundColor: "#FFFFFF", borderColor: "#E0E7F0", borderWidth: 1, borderBottomLeftRadius: 4 }, messageText: { fontSize: 16, lineHeight: 24, textAlign: "right" }, userText: { color: "#FFFFFF" }, assistantText: { color: "#1C2941" }, composer: { flexDirection: "row-reverse", alignItems: "flex-end", gap: 10, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14, backgroundColor: "#F7F9FC", borderTopColor: "#E1E8F2", borderTopWidth: StyleSheet.hairlineWidth }, input: { flex: 1, minHeight: 48, maxHeight: 120, borderRadius: 18, paddingHorizontal: 15, paddingVertical: 11, backgroundColor: "#FFFFFF", borderColor: "#D6E0EE", borderWidth: 1, color: "#152033", fontSize: 16, lineHeight: 22 }, sendButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, sendButtonText: { color: "#FFFFFF", fontSize: 22, fontWeight: "800", lineHeight: 24 }, pressed: { transform: [{ scale: 0.97 }], opacity: 0.88 },
+  setupLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18 }, noticeLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, paddingHorizontal: 24 }, logoMark: { width: 88, height: 88, borderRadius: 28, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", shadowColor: "#0B5FFF", shadowOpacity: 0.25, shadowRadius: 20, elevation: 7 }, logoGlyph: { color: "#FFFFFF", fontSize: 46, lineHeight: 56 }, title: { fontSize: 30, fontWeight: "800", color: "#152033", textAlign: "center" }, subtitle: { color: "#58657D", fontSize: 16, lineHeight: 24, textAlign: "center", maxWidth: 350 }, specCard: { width: "100%", borderRadius: 20, backgroundColor: "#FFFFFF", borderColor: "#DFE7F5", borderWidth: 1, padding: 18, gap: 7 }, specTitle: { color: "#152033", fontSize: 16, fontWeight: "700", textAlign: "right" }, specText: { color: "#58657D", fontSize: 13, lineHeight: 19, textAlign: "right" }, statusPanel: { width: "100%", padding: 16, borderRadius: 18, backgroundColor: "#ECF2FF", gap: 10 }, statusRow: { flexDirection: "row-reverse", justifyContent: "space-between" }, statusLabel: { color: "#22314D", fontWeight: "700" }, statusValue: { color: "#0B5FFF", fontWeight: "800" }, progressTrack: { backgroundColor: "#CDD9F4", height: 8, borderRadius: 4, overflow: "hidden" }, progressFill: { height: "100%", borderRadius: 4, backgroundColor: "#0B5FFF" }, statusDetails: { color: "#58657D", fontSize: 12, textAlign: "right" }, transferRow: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 10 }, transferMetric: { color: "#344764", fontSize: 12, fontWeight: "700" }, primaryButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, primaryButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, pauseButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#E7EEFC", borderWidth: 1, borderColor: "#AFC4F4", alignItems: "center", justifyContent: "center" }, pauseButtonText: { color: "#0B5FFF", fontWeight: "800", fontSize: 16 }, pendingButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#577DCB", flexDirection: "row-reverse", gap: 10, alignItems: "center", justifyContent: "center" }, pendingButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, errorText: { color: "#C62828", textAlign: "center", fontSize: 13, lineHeight: 20 }, header: { paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#F7F9FC", borderBottomColor: "#E1E8F2", borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center" }, headerTitle: { color: "#152033", fontSize: 18, fontWeight: "800", textAlign: "right" }, headerStatus: { color: "#16794B", fontSize: 12, marginTop: 3, textAlign: "right" }, headerAction: { paddingHorizontal: 13, paddingVertical: 9, borderRadius: 12, backgroundColor: "#E7EEFC" }, headerActionText: { color: "#0B5FFF", fontWeight: "700", fontSize: 13 }, messageList: { padding: 16, gap: 10 }, messageRow: { flexDirection: "row", width: "100%" }, userRow: { justifyContent: "flex-end" }, assistantRow: { justifyContent: "flex-start" }, messageBubble: { maxWidth: "84%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 11 }, userBubble: { backgroundColor: "#0B5FFF", borderBottomRightRadius: 4 }, assistantBubble: { backgroundColor: "#FFFFFF", borderColor: "#E0E7F0", borderWidth: 1, borderBottomLeftRadius: 4 }, messageText: { fontSize: 16, lineHeight: 24, textAlign: "right" }, userText: { color: "#FFFFFF" }, assistantText: { color: "#1C2941" }, composer: { flexDirection: "row-reverse", alignItems: "flex-end", gap: 10, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14, backgroundColor: "#F7F9FC", borderTopColor: "#E1E8F2", borderTopWidth: StyleSheet.hairlineWidth }, input: { flex: 1, minHeight: 48, maxHeight: 120, borderRadius: 18, paddingHorizontal: 15, paddingVertical: 11, backgroundColor: "#FFFFFF", borderColor: "#D6E0EE", borderWidth: 1, color: "#152033", fontSize: 16, lineHeight: 22 }, sendButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, sendButtonText: { color: "#FFFFFF", fontSize: 22, fontWeight: "800", lineHeight: 24 }, pressed: { transform: [{ scale: 0.97 }], opacity: 0.88 },
 });

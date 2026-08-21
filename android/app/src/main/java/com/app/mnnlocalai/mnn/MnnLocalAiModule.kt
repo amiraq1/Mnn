@@ -1,6 +1,7 @@
 package com.app.mnnlocalai.mnn
 
 import android.os.Debug
+import android.os.SystemClock
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -14,10 +15,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactContextBaseJavaModule(appContext) {
   private val ioExecutor = Executors.newSingleThreadExecutor()
   private val downloadRunning = AtomicBoolean(false)
+  private val downloadPauseController = DownloadPauseController()
   private val modelDirectory = File(appContext.filesDir, "models/qwen2.5-0.5b-mnn-q4")
-  private val downloader = MnnModelDownloader(modelDirectory, ::emitDownloadProgress)
+  private val downloader = MnnModelDownloader(modelDirectory, ::emitDownloadProgress, downloadPauseController)
   private val ggufStore = GgufModelStore(appContext)
   @Volatile private var activeGgufDownload: RecommendedGgufModel? = null
+  @Volatile private var downloadPaused = false
+  @Volatile private var latestDownloadPhase = ""
+  @Volatile private var latestDownloadFile = ""
+  @Volatile private var latestDownloadSpeedBytesPerSecond = 0.0
+  @Volatile private var latestDownloadEtaSeconds = -1L
+  @Volatile private var downloadSampleAtMs = 0L
+  @Volatile private var downloadSampleBytes = 0L
   @Volatile private var latestGenerationMs = 0L
   @Volatile private var latestGeneratedSteps = 0L
   @Volatile private var latestGenerationStopped = false
@@ -42,6 +51,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       val map = Arguments.createMap()
       val complete = downloader.isComplete()
       map.putString("state", when {
+        downloadPaused -> "paused"
         downloadRunning.get() -> "downloading"
         gguf != null -> "ready"
         complete -> "ready"
@@ -52,6 +62,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       map.putString("engine", if (activeCatalogModel != null || gguf != null) "gguf" else "mnn")
       map.putString("format", if (activeCatalogModel != null) "GGUF" else if (gguf != null) "GGUF v${gguf.version}" else "MNN")
       map.putString("modelName", activeCatalogModel?.displayName ?: gguf?.name ?: "Qwen2.5 0.5B — MNN Q4")
+      if (downloadPaused) map.putString("message", "تم إيقاف التنزيل مؤقتًا. استأنفه عند جاهزية الشبكة.")
       if (!nativeLibraryLoaded) map.putString("message", nativeLoadError)
       promise.resolve(map)
     }
@@ -64,11 +75,20 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
 
   @ReactMethod
   fun startModelDownload() {
+    if (downloadPaused) {
+      emitError(null, "يوجد تنزيل موقوف مؤقتًا. استخدم زر الاستئناف لإكماله من آخر بايت محفوظ.")
+      return
+    }
     if (!downloadRunning.compareAndSet(false, true)) return
+    activeGgufDownload = null
+    downloadPauseController.resume()
+    resetDownloadTelemetry(downloader.completedBytes())
     ioExecutor.execute {
       try {
         downloader.downloadAll()
         emit("MnnLocalAiDownloadCompleted", Arguments.createMap())
+      } catch (_: DownloadPausedException) {
+        markDownloadPaused()
       } catch (error: Exception) {
         emitError(null, error.message ?: "تعذر تنزيل النموذج")
       } finally {
@@ -100,17 +120,63 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       emitError(null, "لا يوجد نموذج GGUF مطابق في الكتالوج")
       return
     }
+    if (downloadPaused) {
+      emitError(null, "يوجد تنزيل موقوف مؤقتًا. استأنفه أو أكمله قبل بدء تنزيل آخر.")
+      return
+    }
     if (!downloadRunning.compareAndSet(false, true)) return
     activeGgufDownload = model
+    downloadPauseController.resume()
+    resetDownloadTelemetry(ggufStore.catalogPartialBytes(model))
     ioExecutor.execute {
       try {
         if (nativeLibraryLoaded) nativeRelease()
-        ggufStore.downloadRecommended(model, ::emitDownloadProgress)
+        ggufStore.downloadRecommended(model, ::emitDownloadProgress, downloadPauseController)
         emit("MnnLocalAiDownloadCompleted", Arguments.createMap())
+      } catch (_: DownloadPausedException) {
+        markDownloadPaused()
       } catch (error: Exception) {
+        activeGgufDownload = null
         emitError(null, error.message ?: "تعذر تنزيل نموذج GGUF")
       } finally {
+        if (!downloadPaused) activeGgufDownload = null
+        downloadRunning.set(false)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun pauseModelDownload() {
+    if (!downloadRunning.get() || latestDownloadPhase != "downloading") {
+      emitError(null, "يمكن إيقاف نقل الملف مؤقتًا فقط أثناء التنزيل، وليس أثناء التحقق.")
+      return
+    }
+    downloadPauseController.pause()
+  }
+
+  @ReactMethod
+  fun resumeModelDownload() {
+    if (!downloadPaused || !downloadRunning.compareAndSet(false, true)) return
+    downloadPaused = false
+    downloadPauseController.resume()
+    val catalogModel = activeGgufDownload
+    resetDownloadTelemetry(if (catalogModel != null) ggufStore.catalogPartialBytes(catalogModel) else downloader.completedBytes())
+    ioExecutor.execute {
+      try {
+        if (catalogModel != null) {
+          if (nativeLibraryLoaded) nativeRelease()
+          ggufStore.downloadRecommended(catalogModel, ::emitDownloadProgress, downloadPauseController)
+        } else {
+          downloader.downloadAll()
+        }
+        emit("MnnLocalAiDownloadCompleted", Arguments.createMap())
+      } catch (_: DownloadPausedException) {
+        markDownloadPaused()
+      } catch (error: Exception) {
         activeGgufDownload = null
+        emitError(null, error.message ?: "تعذر استئناف التنزيل")
+      } finally {
+        if (!downloadPaused) activeGgufDownload = null
         downloadRunning.set(false)
       }
     }
@@ -169,7 +235,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
 
   @ReactMethod
   fun deleteModel() {
-    if (downloadRunning.get()) {
+    if (downloadRunning.get() || downloadPaused) {
       emitError(null, "لا يمكن حذف النموذج أثناء التنزيل")
       return
     }
@@ -228,12 +294,53 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   fun emitErrorFromNative(runId: String?, message: String) = emitError(runId, message)
 
   private fun emitDownloadProgress(downloadedBytes: Long, totalBytes: Long, currentFile: String, phase: String) {
+    latestDownloadPhase = phase
+    latestDownloadFile = currentFile
+    updateDownloadTelemetry(downloadedBytes, totalBytes, phase)
     emit("MnnLocalAiDownloadProgress", Arguments.createMap().apply {
       putDouble("downloadedBytes", downloadedBytes.toDouble())
       putDouble("totalBytes", totalBytes.toDouble())
       putString("currentFile", currentFile)
       putString("phase", phase)
+      putDouble("speedBytesPerSecond", latestDownloadSpeedBytesPerSecond)
+      putDouble("etaSeconds", latestDownloadEtaSeconds.toDouble())
     })
+  }
+
+  private fun resetDownloadTelemetry(initialBytes: Long) {
+    downloadPaused = false
+    latestDownloadPhase = "downloading"
+    latestDownloadFile = ""
+    latestDownloadSpeedBytesPerSecond = 0.0
+    latestDownloadEtaSeconds = -1L
+    downloadSampleAtMs = SystemClock.elapsedRealtime()
+    downloadSampleBytes = initialBytes
+  }
+
+  private fun updateDownloadTelemetry(downloadedBytes: Long, totalBytes: Long, phase: String) {
+    if (phase != "downloading") {
+      latestDownloadSpeedBytesPerSecond = 0.0
+      latestDownloadEtaSeconds = -1L
+      return
+    }
+    val now = SystemClock.elapsedRealtime()
+    val elapsedMs = now - downloadSampleAtMs
+    if (elapsedMs < 750L || downloadedBytes < downloadSampleBytes) return
+    latestDownloadSpeedBytesPerSecond = (downloadedBytes - downloadSampleBytes) * 1000.0 / elapsedMs
+    latestDownloadEtaSeconds = if (latestDownloadSpeedBytesPerSecond > 0.0) ((totalBytes - downloadedBytes).coerceAtLeast(0) / latestDownloadSpeedBytesPerSecond).toLong() else -1L
+    downloadSampleAtMs = now
+    downloadSampleBytes = downloadedBytes
+  }
+
+  private fun markDownloadPaused() {
+    downloadPaused = true
+    latestDownloadPhase = "paused"
+    latestDownloadSpeedBytesPerSecond = 0.0
+    latestDownloadEtaSeconds = -1L
+    val catalogModel = activeGgufDownload
+    val bytes = if (catalogModel != null) ggufStore.catalogPartialBytes(catalogModel) else downloader.completedBytes()
+    val total = catalogModel?.bytes ?: MnnModelRepository.totalBytes
+    emitDownloadProgress(bytes, total, latestDownloadFile, "paused")
   }
 
   private fun emitError(runId: String?, message: String) {

@@ -101,7 +101,7 @@ class GgufModelStore(private val context: Context) {
     }
   }
 
-  fun downloadRecommended(model: RecommendedGgufModel, onProgress: (Long, Long, String, String) -> Unit): GgufModel {
+  fun downloadRecommended(model: RecommendedGgufModel, onProgress: (Long, Long, String, String) -> Unit, pauseController: DownloadPauseController): GgufModel {
     ensureStorage(model.bytes)
     val destination = File(root, "${model.id}.gguf")
     if (destination.exists() && destination.length() == model.bytes && sha256(destination).equals(model.sha256, true)) {
@@ -113,6 +113,7 @@ class GgufModelStore(private val context: Context) {
     val partial = File(root, "${model.id}.gguf.part")
     var attempts = 0
     while (attempts < 2) {
+      pauseController.throwIfPaused()
       attempts += 1
       var offset = partial.length().coerceAtMost(model.bytes)
       val connection = (URL(model.downloadUrl()).openConnection() as HttpURLConnection).apply {
@@ -122,7 +123,9 @@ class GgufModelStore(private val context: Context) {
         setRequestProperty("Accept-Encoding", "identity")
         if (offset > 0) setRequestProperty("Range", "bytes=$offset-")
       }
+      pauseController.attach(connection)
       try {
+        pauseController.throwIfPaused()
         val code = connection.responseCode
         if (offset > 0 && code != HttpURLConnection.HTTP_PARTIAL) {
           partial.delete()
@@ -135,6 +138,7 @@ class GgufModelStore(private val context: Context) {
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             var downloaded = offset
             while (true) {
+              pauseController.throwIfPaused()
               val count = input.read(buffer)
               if (count <= 0) break
               output.write(buffer, 0, count)
@@ -154,7 +158,11 @@ class GgufModelStore(private val context: Context) {
         if (!partial.renameTo(destination)) throw IllegalStateException("تعذر تثبيت نموذج GGUF بعد التحقق")
         activate(destination, model.id, model.displayName)
         return GgufModel(model.id, model.displayName, destination, destination.length(), version)
+      } catch (error: Exception) {
+        if (pauseController.isPaused()) throw DownloadPausedException()
+        throw error
       } finally {
+        pauseController.detach(connection)
         connection.disconnect()
       }
     }

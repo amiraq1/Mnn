@@ -1,6 +1,6 @@
 import { DeviceEventEmitter, NativeModules, Platform } from "react-native";
 
-export type NativeModelState = "missing" | "downloading" | "verifying" | "ready" | "loading" | "warming" | "failed";
+export type NativeModelState = "missing" | "downloading" | "paused" | "verifying" | "ready" | "loading" | "warming" | "failed";
 
 export type ModelStatus = {
   state: NativeModelState;
@@ -16,7 +16,9 @@ export type NativeDownloadProgress = {
   downloadedBytes: number;
   totalBytes: number;
   currentFile: string;
-  phase: "downloading" | "verifying";
+  phase: "downloading" | "paused" | "verifying";
+  speedBytesPerSecond: number;
+  etaSeconds: number;
 };
 
 export type RecommendedGgufModel = {
@@ -43,6 +45,8 @@ type MnnNativeModule = {
   getModelStatus(): Promise<ModelStatus>;
   getPerformanceMetrics(): Promise<PerformanceMetrics>;
   startModelDownload(): void;
+  pauseModelDownload(): void;
+  resumeModelDownload(): void;
   initializeModel(): Promise<{ loadMs: number; warmupMs: number }>;
   generate(prompt: string, runId: string): Promise<boolean>;
   stopGeneration(): void;
@@ -69,6 +73,8 @@ export const mnnLocalAi = {
   getModelStatus: () => requireNativeModule().getModelStatus(),
   getPerformanceMetrics: () => requireNativeModule().getPerformanceMetrics(),
   startModelDownload: () => requireNativeModule().startModelDownload(),
+  pauseModelDownload: () => requireNativeModule().pauseModelDownload(),
+  resumeModelDownload: () => requireNativeModule().resumeModelDownload(),
   initializeModel: () => requireNativeModule().initializeModel(),
   generate: (prompt: string, runId: string) => requireNativeModule().generate(prompt, runId),
   stopGeneration: () => requireNativeModule().stopGeneration(),

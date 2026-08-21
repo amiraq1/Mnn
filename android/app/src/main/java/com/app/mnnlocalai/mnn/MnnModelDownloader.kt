@@ -37,6 +37,7 @@ object MnnModelRepository {
 class MnnModelDownloader(
   private val root: File,
   private val onProgress: (downloadedBytes: Long, totalBytes: Long, currentFile: String, phase: String) -> Unit,
+  private val pauseController: DownloadPauseController,
 ) {
   private val stateFile = File(root, "download-state.json")
 
@@ -63,19 +64,28 @@ class MnnModelDownloader(
 
   fun downloadAll() {
     if (!root.exists() && !root.mkdirs()) throw IllegalStateException("تعذر إنشاء مجلد النموذج المحلي")
-    MnnModelRepository.artifacts.forEach { artifact ->
-      val finalFile = File(root, artifact.name)
-      if (finalFile.exists() && finalFile.length() == artifact.bytes && sha256(finalFile).equals(artifact.sha256, true)) return@forEach
-      if (finalFile.exists()) finalFile.delete()
-      downloadArtifact(artifact)
+    var currentFile = ""
+    try {
+      MnnModelRepository.artifacts.forEach { artifact ->
+        pauseController.throwIfPaused()
+        currentFile = artifact.name
+        val finalFile = File(root, artifact.name)
+        if (finalFile.exists() && finalFile.length() == artifact.bytes && sha256(finalFile).equals(artifact.sha256, true)) return@forEach
+        if (finalFile.exists()) finalFile.delete()
+        downloadArtifact(artifact)
+      }
+      persistState("ready", MnnModelRepository.totalBytes, "")
+    } catch (paused: DownloadPausedException) {
+      persistState("paused", completedBytes(), currentFile)
+      throw paused
     }
-    persistState("ready", MnnModelRepository.totalBytes, "")
   }
 
   private fun downloadArtifact(artifact: ModelArtifact) {
     val partFile = File(root, "${artifact.name}.part")
     var attempts = 0
     while (attempts < 2) {
+      pauseController.throwIfPaused()
       attempts += 1
       var offset = partFile.length().coerceAtMost(artifact.bytes)
       val connection = (URL(MnnModelRepository.urlFor(artifact)).openConnection() as HttpURLConnection).apply {
@@ -85,7 +95,9 @@ class MnnModelDownloader(
         setRequestProperty("Accept-Encoding", "identity")
         if (offset > 0) setRequestProperty("Range", "bytes=$offset-")
       }
+      pauseController.attach(connection)
       try {
+        pauseController.throwIfPaused()
         val code = connection.responseCode
         if (offset > 0 && code != HttpURLConnection.HTTP_PARTIAL) {
           partFile.delete()
@@ -102,6 +114,7 @@ class MnnModelDownloader(
             var downloadedForArtifact = offset
             var bytesSinceStateWrite = 0L
             while (true) {
+              pauseController.throwIfPaused()
               val count = input.read(buffer)
               if (count <= 0) break
               output.write(buffer, 0, count)
@@ -127,7 +140,11 @@ class MnnModelDownloader(
         if (!partFile.renameTo(finalFile)) throw IllegalStateException("تعذر تثبيت الملف ${artifact.name} بعد التحقق")
         persistState("downloading", completedBytes(), artifact.name)
         return
+      } catch (error: Exception) {
+        if (pauseController.isPaused()) throw DownloadPausedException()
+        throw error
       } finally {
+        pauseController.detach(connection)
         connection.disconnect()
       }
     }
