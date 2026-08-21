@@ -1,3 +1,4 @@
 [submodule "vendor/MNN"]
 	path = vendor/MNN
 	url = https://github.com/alibaba/MNN.git
+	ignore = dirty
