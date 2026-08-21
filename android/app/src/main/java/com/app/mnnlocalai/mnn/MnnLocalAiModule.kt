@@ -1,5 +1,6 @@
 package com.app.mnnlocalai.mnn
 
+import android.os.Debug
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -15,6 +16,9 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   private val downloadRunning = AtomicBoolean(false)
   private val modelDirectory = File(appContext.filesDir, "models/qwen2.5-0.5b-mnn-q4")
   private val downloader = MnnModelDownloader(modelDirectory, ::emitDownloadProgress)
+  @Volatile private var latestGenerationMs = 0L
+  @Volatile private var latestGeneratedSteps = 0L
+  @Volatile private var latestGenerationStopped = false
 
   init {
     nativeLibraryLoaded = try {
@@ -43,6 +47,11 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       if (!nativeLibraryLoaded) map.putString("message", nativeLoadError)
       promise.resolve(map)
     }
+  }
+
+  @ReactMethod
+  fun getPerformanceMetrics(promise: Promise) {
+    ioExecutor.execute { promise.resolve(performanceMetricsMap()) }
   }
 
   @ReactMethod
@@ -128,10 +137,14 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
     })
   }
 
-  fun emitGenerationCompletedFromNative(runId: String, stopped: Boolean) {
+  fun emitGenerationCompletedFromNative(runId: String, stopped: Boolean, generationMs: Long, generatedSteps: Long) {
+    latestGenerationMs = generationMs
+    latestGeneratedSteps = generatedSteps
+    latestGenerationStopped = stopped
     emit("MnnLocalAiGenerationCompleted", Arguments.createMap().apply {
       putString("runId", runId)
       putBoolean("stopped", stopped)
+      putMetrics(this)
     })
   }
 
@@ -151,6 +164,23 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       putString("message", message)
       if (runId != null) putString("runId", runId)
     })
+  }
+
+  private fun performanceMetricsMap() = Arguments.createMap().apply { putMetrics(this) }
+
+  private fun putMetrics(map: com.facebook.react.bridge.WritableMap) {
+    val memoryInfo = Debug.MemoryInfo()
+    Debug.getMemoryInfo(memoryInfo)
+    val javaHeapUsedBytes = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()
+    val stepsPerSecond = if (latestGenerationMs > 0) latestGeneratedSteps * 1000.0 / latestGenerationMs else 0.0
+    map.putBoolean("hasGeneration", latestGenerationMs > 0)
+    map.putDouble("generationMs", latestGenerationMs.toDouble())
+    map.putDouble("generatedSteps", latestGeneratedSteps.toDouble())
+    map.putDouble("stepsPerSecond", stepsPerSecond)
+    map.putBoolean("stopped", latestGenerationStopped)
+    map.putDouble("totalPssKb", memoryInfo.totalPss.toDouble())
+    map.putDouble("nativePssKb", memoryInfo.nativePss.toDouble())
+    map.putDouble("javaHeapUsedKb", javaHeapUsedBytes / 1024.0)
   }
 
   private fun emit(eventName: String, payload: com.facebook.react.bridge.WritableMap) {

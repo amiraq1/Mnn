@@ -15,7 +15,7 @@ import {
 
 import { ScreenContainer } from "@/components/screen-container";
 import { formatBytes, MODEL_SPEC, MODEL_TOTAL_BYTES } from "@/lib/model-spec";
-import { isNativeMnnAvailable, mnnLocalAi, type ModelStatus, type NativeDownloadProgress } from "@/lib/mnn-local-ai";
+import { isNativeMnnAvailable, mnnLocalAi, type ModelStatus, type NativeDownloadProgress, type PerformanceMetrics } from "@/lib/mnn-local-ai";
 
 type ChatMessage = {
   id: string;
@@ -37,6 +37,7 @@ export default function HomeScreen() {
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
   const activeRunId = useRef<string | null>(null);
 
   const percent = useMemo(() => {
@@ -62,10 +63,11 @@ export default function HomeScreen() {
         if (activeRunId.current !== runId) return;
         setMessages((current) => current.map((message) => message.id === runId ? { ...message, content: `${message.content}${token.replace("<eop>", "")}` } : message));
       }),
-      mnnLocalAi.onGenerationCompleted(({ runId }) => {
+      mnnLocalAi.onGenerationCompleted(({ runId, ...nextMetrics }) => {
         if (activeRunId.current !== runId) return;
         activeRunId.current = null;
         setIsGenerating(false);
+        setMetrics(nextMetrics);
         setMessages((current) => current.map((message) => message.id === runId ? { ...message, pending: false } : message));
       }),
       mnnLocalAi.onNativeError(({ message, runId }) => {
@@ -98,6 +100,14 @@ export default function HomeScreen() {
       setStatus((current) => ({ ...current, state: "ready", message: `تحميل ${timing.loadMs}ms · warm-up ${timing.warmupMs}ms` }));
     } catch (error) {
       setStatus((current) => ({ ...current, state: "failed", message: error instanceof Error ? error.message : "تعذر تحضير النموذج" }));
+    }
+  }
+
+  async function refreshMetrics() {
+    try {
+      setMetrics(await mnnLocalAi.getPerformanceMetrics());
+    } catch {
+      // تبقى آخر قياسات معروضة إذا كانت نسخة Android لا تدعم الميزة بعد.
     }
   }
 
@@ -171,7 +181,7 @@ export default function HomeScreen() {
     <ScreenContainer className="flex-1" edges={["top", "left", "right"]}>
       <View style={styles.header}>
         <View><Text style={styles.headerTitle}>MNN Local AI</Text><Text style={styles.headerStatus}>جاهز محليًا {status.message ? `· ${status.message}` : ""}</Text></View>
-        <Pressable accessibilityRole="button" accessibilityLabel="تفاصيل النموذج المحلي" onPress={() => setShowDetails(true)} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>إدارة</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="تفاصيل النموذج المحلي" onPress={() => { setShowDetails(true); void refreshMetrics(); }} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>إدارة</Text></Pressable>
       </View>
       <FlatList
         data={messages}
@@ -187,7 +197,7 @@ export default function HomeScreen() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
-      <ModelDetailsSheet visible={showDetails} status={status} onClose={() => setShowDetails(false)} onRecheck={() => { setShowDetails(false); void refreshStatus(); }} onDelete={confirmDelete} />
+      <ModelDetailsSheet visible={showDetails} status={status} metrics={metrics} onClose={() => setShowDetails(false)} onRecheck={() => { setShowDetails(false); void refreshStatus(); void refreshMetrics(); }} onDelete={confirmDelete} />
     </ScreenContainer>
   );
 }
@@ -202,9 +212,15 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   return <View style={[styles.messageRow, isUser ? styles.userRow : styles.assistantRow]}><View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}><Text style={[styles.messageText, isUser ? styles.userText : styles.assistantText]}>{message.content || (message.pending ? "…" : "")}</Text></View></View>;
 }
 
-function ModelDetailsSheet({ visible, status, onClose, onRecheck, onDelete }: { visible: boolean; status: ModelStatus; onClose: () => void; onRecheck: () => void; onDelete: () => void }) {
+function ModelDetailsSheet({ visible, status, metrics, onClose, onRecheck, onDelete }: { visible: boolean; status: ModelStatus; metrics: PerformanceMetrics | null; onClose: () => void; onRecheck: () => void; onDelete: () => void }) {
   const stateLabel = status.state === "ready" ? "جاهز ومحلي" : status.state === "failed" ? "يتطلب معالجة" : "قيد التجهيز";
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={detailStyles.sheet}><View style={detailStyles.handle} /><Text style={detailStyles.title}>تفاصيل النموذج</Text><DetailRow label="النموذج" value={MODEL_SPEC.displayName} /><DetailRow label="الحالة" value={stateLabel} /><DetailRow label="التخزين المحلي" value={`${formatBytes(status.downloadedBytes)} من ${formatBytes(status.totalBytes)}`} /><DetailRow label="النزاهة" value="SHA-256 لكل ملف" /><DetailRow label="المتطلبات" value={`Android ${MODEL_SPEC.minimumAndroidApi}+ · ${MODEL_SPEC.recommendedRamGb}GB RAM موصى بها`} /><View style={detailStyles.actions}><Pressable accessibilityRole="button" onPress={onRecheck} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>إعادة الفحص</Text></Pressable><Pressable accessibilityRole="button" onPress={() => { onClose(); onDelete(); }} style={({ pressed }) => [detailStyles.dangerButton, pressed && styles.pressed]}><Text style={detailStyles.dangerButtonText}>حذف النموذج</Text></Pressable></View><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
+  const timing = metrics?.hasGeneration ? `${Math.round(metrics.generationMs)} ms${metrics.stopped ? " · تم الإيقاف" : ""}` : "أرسل رسالة لبدء القياس";
+  const rate = metrics?.hasGeneration ? `${metrics.stepsPerSecond.toFixed(1)} خطوة/ث` : "—";
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={detailStyles.sheet}><View style={detailStyles.handle} /><Text style={detailStyles.title}>تفاصيل النموذج</Text><DetailRow label="النموذج" value={MODEL_SPEC.displayName} /><DetailRow label="الحالة" value={stateLabel} /><DetailRow label="التخزين المحلي" value={`${formatBytes(status.downloadedBytes)} من ${formatBytes(status.totalBytes)}`} /><DetailRow label="النزاهة" value="SHA-256 لكل ملف" /><View style={detailStyles.metricsBlock}><Text style={detailStyles.metricsTitle}>أداء آخر توليد</Text><DetailRow label="زمن التوليد" value={timing} /><DetailRow label="خطوات التوليد" value={metrics?.hasGeneration ? `${metrics.generatedSteps}` : "—"} /><DetailRow label="معدل التوليد" value={rate} /><DetailRow label="ذاكرة العملية (PSS)" value={formatKilobytes(metrics?.totalPssKb)} /><DetailRow label="ذاكرة MNN الأصلية" value={formatKilobytes(metrics?.nativePssKb)} /><DetailRow label="ذاكرة Java heap" value={formatKilobytes(metrics?.javaHeapUsedKb)} /></View><DetailRow label="المتطلبات" value={`Android ${MODEL_SPEC.minimumAndroidApi}+ · ${MODEL_SPEC.recommendedRamGb}GB RAM موصى بها`} /><View style={detailStyles.actions}><Pressable accessibilityRole="button" onPress={onRecheck} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>تحديث القياسات</Text></Pressable><Pressable accessibilityRole="button" onPress={() => { onClose(); onDelete(); }} style={({ pressed }) => [detailStyles.dangerButton, pressed && styles.pressed]}><Text style={detailStyles.dangerButtonText}>حذف النموذج</Text></Pressable></View><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
+}
+
+function formatKilobytes(value?: number) {
+  return value && value > 0 ? `${(value / 1024).toFixed(1)} MB` : "غير متاح بعد";
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -224,6 +240,8 @@ const detailStyles = StyleSheet.create({
   sheet: { backgroundColor: "#F7F9FC", borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 20, paddingBottom: 28, paddingTop: 10, gap: 12 },
   handle: { width: 40, height: 5, borderRadius: 3, backgroundColor: "#C9D4E5", alignSelf: "center", marginBottom: 4 },
   title: { fontSize: 20, fontWeight: "800", color: "#152033", textAlign: "right", marginBottom: 4 },
+  metricsBlock: { backgroundColor: "#ECF2FF", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 4, marginVertical: 2 },
+  metricsTitle: { color: "#0B5FFF", fontSize: 14, fontWeight: "800", textAlign: "right", marginTop: 8 },
   row: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 12, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#DCE5F0" },
   label: { color: "#58657D", fontSize: 13, textAlign: "right" },
   value: { color: "#1C2941", fontSize: 13, fontWeight: "600", textAlign: "left", flex: 1 },

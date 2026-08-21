@@ -16,8 +16,20 @@ export type NativeDownloadProgress = {
   phase: "downloading" | "verifying";
 };
 
+export type PerformanceMetrics = {
+  hasGeneration: boolean;
+  generationMs: number;
+  generatedSteps: number;
+  stepsPerSecond: number;
+  stopped: boolean;
+  totalPssKb: number;
+  nativePssKb: number;
+  javaHeapUsedKb: number;
+};
+
 type MnnNativeModule = {
   getModelStatus(): Promise<ModelStatus>;
+  getPerformanceMetrics(): Promise<PerformanceMetrics>;
   startModelDownload(): void;
   initializeModel(): Promise<{ loadMs: number; warmupMs: number }>;
   generate(prompt: string, runId: string): Promise<boolean>;
@@ -39,6 +51,7 @@ function requireNativeModule() {
 
 export const mnnLocalAi = {
   getModelStatus: () => requireNativeModule().getModelStatus(),
+  getPerformanceMetrics: () => requireNativeModule().getPerformanceMetrics(),
   startModelDownload: () => requireNativeModule().startModelDownload(),
   initializeModel: () => requireNativeModule().initializeModel(),
   generate: (prompt: string, runId: string) => requireNativeModule().generate(prompt, runId),
@@ -57,7 +70,7 @@ export const mnnLocalAi = {
   onToken(listener: (event: { runId: string; token: string }) => void) {
     return DeviceEventEmitter.addListener("MnnLocalAiToken", listener);
   },
-  onGenerationCompleted(listener: (event: { runId: string; stopped: boolean }) => void) {
+  onGenerationCompleted(listener: (event: { runId: string; stopped: boolean } & PerformanceMetrics) => void) {
     return DeviceEventEmitter.addListener("MnnLocalAiGenerationCompleted", listener);
   },
 };

@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <android/log.h>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -75,9 +77,11 @@ void emit_error(JNIEnv* env, jobject module, const std::string& run_id, const st
   if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-void emit_completed(JNIEnv* env, jobject module, const std::string& run_id, bool stopped) {
+void emit_completed(JNIEnv* env, jobject module, const std::string& run_id, bool stopped,
+                    int64_t generation_ms, int64_t generated_steps) {
   jstring j_run_id = env->NewStringUTF(run_id.c_str());
-  env->CallVoidMethod(module, g_emit_completed, j_run_id, static_cast<jboolean>(stopped));
+  env->CallVoidMethod(module, g_emit_completed, j_run_id, static_cast<jboolean>(stopped),
+                      static_cast<jlong>(generation_ms), static_cast<jlong>(generated_steps));
   env->DeleteLocalRef(j_run_id);
   if (env->ExceptionCheck()) env->ExceptionClear();
 }
@@ -92,7 +96,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
   g_module_class = static_cast<jclass>(env->NewGlobalRef(local_class));
   env->DeleteLocalRef(local_class);
   g_emit_token = env->GetMethodID(g_module_class, "emitTokenFromNative", "(Ljava/lang/String;Ljava/lang/String;)V");
-  g_emit_completed = env->GetMethodID(g_module_class, "emitGenerationCompletedFromNative", "(Ljava/lang/String;Z)V");
+  g_emit_completed = env->GetMethodID(g_module_class, "emitGenerationCompletedFromNative", "(Ljava/lang/String;ZJJ)V");
   g_emit_error = env->GetMethodID(g_module_class, "emitErrorFromNative", "(Ljava/lang/String;Ljava/lang/String;)V");
   return (g_emit_token && g_emit_completed && g_emit_error) ? JNI_VERSION_1_6 : JNI_ERR;
 }
@@ -170,6 +174,8 @@ Java_com_app_mnnlocalai_mnn_MnnLocalAiModule_nativeGenerate(JNIEnv* env, jobject
       attached = true;
     }
     bool stopped = false;
+    int64_t generated_steps = 0;
+    const auto generation_started = std::chrono::steady_clock::now();
     try {
       CallbackStreamBuffer buffer(worker_env, module_global, run_id_string);
       std::ostream output(&buffer);
@@ -185,10 +191,13 @@ Java_com_app_mnnlocalai_mnn_MnnLocalAiModule_nativeGenerate(JNIEnv* env, jobject
         }
         std::lock_guard<std::mutex> lock(g_model_mutex);
         g_model->generate(1);
+        ++generated_steps;
         if (g_model->stoped()) break;
       }
       stopped = stopped || g_stop_requested.load(std::memory_order_acquire);
-      emit_completed(worker_env, module_global, run_id_string, stopped);
+      const auto generation_finished = std::chrono::steady_clock::now();
+      const auto generation_ms = std::chrono::duration_cast<std::chrono::milliseconds>(generation_finished - generation_started).count();
+      emit_completed(worker_env, module_global, run_id_string, stopped, generation_ms, generated_steps);
     } catch (const std::exception& error) {
       emit_error(worker_env, module_global, run_id_string, error.what());
     }
