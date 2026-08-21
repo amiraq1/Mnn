@@ -30,6 +30,23 @@ export type RecommendedGgufModel = {
   recommendedRamGb: number;
 };
 
+export type DownloadSettings = {
+  completionNotificationsEnabled: boolean;
+  cellularSpeedLimitKbps: number;
+  isCellularNetwork: boolean;
+};
+
+export type DownloadHistoryEntry = {
+  timestampMs: number;
+  modelName: string;
+  engine: "mnn" | "gguf";
+  bytes: number;
+  durationMs: number;
+  averageBytesPerSecond: number;
+  outcome: "completed" | "paused" | "failed";
+  errorMessage?: string;
+};
+
 export type PerformanceMetrics = {
   hasGeneration: boolean;
   generationMs: number;
@@ -44,6 +61,10 @@ export type PerformanceMetrics = {
 type MnnNativeModule = {
   getModelStatus(): Promise<ModelStatus>;
   getPerformanceMetrics(): Promise<PerformanceMetrics>;
+  getDownloadSettings(): Promise<DownloadSettings>;
+  setDownloadSettings(completionNotificationsEnabled: boolean, cellularSpeedLimitKbps: number): Promise<DownloadSettings>;
+  getDownloadHistory(): Promise<DownloadHistoryEntry[]>;
+  clearDownloadHistory(): Promise<void>;
   startModelDownload(): void;
   pauseModelDownload(): void;
   resumeModelDownload(): void;
@@ -72,6 +93,10 @@ function requireNativeModule() {
 export const mnnLocalAi = {
   getModelStatus: () => requireNativeModule().getModelStatus(),
   getPerformanceMetrics: () => requireNativeModule().getPerformanceMetrics(),
+  getDownloadSettings: () => requireNativeModule().getDownloadSettings(),
+  setDownloadSettings: (completionNotificationsEnabled: boolean, cellularSpeedLimitKbps: number) => requireNativeModule().setDownloadSettings(completionNotificationsEnabled, cellularSpeedLimitKbps),
+  getDownloadHistory: () => requireNativeModule().getDownloadHistory(),
+  clearDownloadHistory: () => requireNativeModule().clearDownloadHistory(),
   startModelDownload: () => requireNativeModule().startModelDownload(),
   pauseModelDownload: () => requireNativeModule().pauseModelDownload(),
   resumeModelDownload: () => requireNativeModule().resumeModelDownload(),

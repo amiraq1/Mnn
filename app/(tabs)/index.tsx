@@ -8,7 +8,9 @@ import {
   Modal,
   Platform,
   Pressable,
+  PermissionsAndroid,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -16,7 +18,7 @@ import {
 
 import { ScreenContainer } from "@/components/screen-container";
 import { formatBytes, MODEL_SPEC, MODEL_TOTAL_BYTES } from "@/lib/model-spec";
-import { isNativeMnnAvailable, mnnLocalAi, type ModelStatus, type NativeDownloadProgress, type PerformanceMetrics, type RecommendedGgufModel } from "@/lib/mnn-local-ai";
+import { isNativeMnnAvailable, mnnLocalAi, type DownloadHistoryEntry, type DownloadSettings, type ModelStatus, type NativeDownloadProgress, type PerformanceMetrics, type RecommendedGgufModel } from "@/lib/mnn-local-ai";
 
 type ChatMessage = {
   id: string;
@@ -43,6 +45,9 @@ export default function HomeScreen() {
   const [isImporting, setIsImporting] = useState(false);
   const [recommendedModels, setRecommendedModels] = useState<RecommendedGgufModel[]>([]);
   const [showCatalog, setShowCatalog] = useState(false);
+  const [showDownloadCenter, setShowDownloadCenter] = useState(false);
+  const [downloadSettings, setDownloadSettings] = useState<DownloadSettings | null>(null);
+  const [downloadHistory, setDownloadHistory] = useState<DownloadHistoryEntry[]>([]);
   const activeRunId = useRef<string | null>(null);
 
   const percent = useMemo(() => {
@@ -55,6 +60,7 @@ export default function HomeScreen() {
     if (!isNativeMnnAvailable) return;
     void refreshStatus();
     void loadRecommendedModels();
+    void loadDownloadControls();
     const subscriptions = [
       mnnLocalAi.onDownloadProgress((event) => {
         setProgress(event);
@@ -103,6 +109,45 @@ export default function HomeScreen() {
       setRecommendedModels(await mnnLocalAi.getRecommendedGgufModels());
     } catch {
       setRecommendedModels([]);
+    }
+  }
+
+  async function loadDownloadControls() {
+    try {
+      const [settings, history] = await Promise.all([mnnLocalAi.getDownloadSettings(), mnnLocalAi.getDownloadHistory()]);
+      setDownloadSettings(settings);
+      setDownloadHistory(history);
+    } catch {
+      setDownloadSettings(null);
+      setDownloadHistory([]);
+    }
+  }
+
+  function openDownloadCenter() {
+    setShowDownloadCenter(true);
+    void loadDownloadControls();
+  }
+
+  async function updateDownloadSettings(completionNotificationsEnabled: boolean, cellularSpeedLimitKbps: number) {
+    let notificationsEnabled = completionNotificationsEnabled;
+    if (completionNotificationsEnabled && Platform.OS === "android" && Number(Platform.Version) >= 33) {
+      const permission = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      notificationsEnabled = permission === PermissionsAndroid.RESULTS.GRANTED;
+      if (!notificationsEnabled) Alert.alert("الإشعارات غير مفعّلة", "يمكنك السماح بالإشعارات من إعدادات Android لتلقي تنبيه عند اكتمال النموذج.");
+    }
+    try {
+      setDownloadSettings(await mnnLocalAi.setDownloadSettings(notificationsEnabled, cellularSpeedLimitKbps));
+    } catch (error) {
+      Alert.alert("تعذر حفظ الإعداد", error instanceof Error ? error.message : "تحقق من إصدار Android المخصص.");
+    }
+  }
+
+  async function clearDownloadHistory() {
+    try {
+      await mnnLocalAi.clearDownloadHistory();
+      setDownloadHistory([]);
+    } catch (error) {
+      Alert.alert("تعذر مسح السجل", error instanceof Error ? error.message : "حدث خطأ غير متوقع.");
     }
   }
 
@@ -231,6 +276,7 @@ export default function HomeScreen() {
             <Text style={styles.specText}>المساحة: {formatBytes(status.totalBytes || MODEL_TOTAL_BYTES)} · ذاكرة موصى بها: {status.engine === "gguf" ? "4GB+ بحسب النموذج" : `${MODEL_SPEC.recommendedRamGb}GB`}</Text>
           </View>
           <StatusPanel status={status} progress={progress} percent={percent} />
+          <Pressable accessibilityRole="button" accessibilityLabel="إعدادات وسجل التنزيل" onPress={openDownloadCenter} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>إعدادات وسجل التنزيل</Text></Pressable>
           {status.state === "ready" ? (
             <PrimaryButton label="بدء محادثة" onPress={() => setChatStarted(true)} />
           ) : status.state === "missing" || status.state === "failed" ? (
@@ -244,6 +290,7 @@ export default function HomeScreen() {
           ) : null}
           {status.state === "failed" ? <Text style={styles.errorText}>{status.message}</Text> : null}
           <ModelCatalogSheet visible={showCatalog} models={recommendedModels} onClose={() => setShowCatalog(false)} onSelect={startRecommendedDownload} />
+          <DownloadCenterSheet visible={showDownloadCenter} settings={downloadSettings} history={downloadHistory} onClose={() => setShowDownloadCenter(false)} onUpdateSettings={updateDownloadSettings} onClearHistory={() => void clearDownloadHistory()} />
         </View>
       </ScreenContainer>
     );
@@ -253,7 +300,7 @@ export default function HomeScreen() {
     <ScreenContainer className="flex-1" edges={["top", "left", "right"]}>
       <View style={styles.header}>
         <View><Text style={styles.headerTitle}>MNN Local AI</Text><Text style={styles.headerStatus}>جاهز عبر {status.engine === "gguf" ? "GGUF / llama.cpp" : "MNN"} {status.message ? `· ${status.message}` : ""}</Text></View>
-        <Pressable accessibilityRole="button" accessibilityLabel="تفاصيل النموذج المحلي" onPress={() => { setShowDetails(true); void refreshMetrics(); }} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>إدارة</Text></Pressable>
+        <View style={styles.headerActions}><Pressable accessibilityRole="button" accessibilityLabel="إعدادات وسجل التنزيل" onPress={openDownloadCenter} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>التنزيلات</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="تفاصيل النموذج المحلي" onPress={() => { setShowDetails(true); void refreshMetrics(); }} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>إدارة</Text></Pressable></View>
       </View>
       <FlatList
         data={messages}
@@ -270,6 +317,7 @@ export default function HomeScreen() {
         </View>
       </KeyboardAvoidingView>
       <ModelDetailsSheet visible={showDetails} status={status} metrics={metrics} onClose={() => setShowDetails(false)} onRecheck={() => { setShowDetails(false); void refreshStatus(); void refreshMetrics(); }} onDelete={confirmDelete} />
+      <DownloadCenterSheet visible={showDownloadCenter} settings={downloadSettings} history={downloadHistory} onClose={() => setShowDownloadCenter(false)} onUpdateSettings={updateDownloadSettings} onClearHistory={() => void clearDownloadHistory()} />
     </ScreenContainer>
   );
 }
@@ -296,6 +344,16 @@ function ModelCatalogSheet({ visible, models, onClose, onSelect }: { visible: bo
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={[detailStyles.sheet, { maxHeight: "82%" }]}><View style={detailStyles.handle} /><Text style={detailStyles.title}>نماذج GGUF الموصى بها</Text><Text style={detailStyles.catalogIntro}>تُنزل النماذج إلى جهازك مع استئناف النقل والتحقق من SHA-256. اختر نموذجًا يناسب ذاكرة هاتفك.</Text><FlatList data={models} keyExtractor={(item) => item.id} contentContainerStyle={{ gap: 10 }} renderItem={({ item }) => <View style={detailStyles.catalogCard}><Text style={detailStyles.catalogName}>{item.displayName}</Text><Text style={detailStyles.catalogDescription}>{item.description}</Text><View style={detailStyles.catalogMeta}><Text style={detailStyles.catalogMetaText}>{formatBytes(item.bytes)}</Text><Text style={detailStyles.catalogMetaText}>{item.format} · RAM {item.recommendedRamGb}GB+</Text></View><Pressable accessibilityRole="button" onPress={() => onSelect(item)} style={({ pressed }) => [detailStyles.catalogButton, pressed && styles.pressed]}><Text style={detailStyles.catalogButtonText}>تنزيل واستخدام هذا النموذج</Text></Pressable></View>} ListEmptyComponent={<Text style={detailStyles.catalogDescription}>يجري تحميل الكتالوج…</Text>} /><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
 }
 
+function DownloadCenterSheet({ visible, settings, history, onClose, onUpdateSettings, onClearHistory }: { visible: boolean; settings: DownloadSettings | null; history: DownloadHistoryEntry[]; onClose: () => void; onUpdateSettings: (notifications: boolean, cellularLimitKbps: number) => Promise<void>; onClearHistory: () => void }) {
+  const limit = settings?.cellularSpeedLimitKbps ?? 0;
+  const setLimit = (value: number) => { if (settings) void onUpdateSettings(settings.completionNotificationsEnabled, value); };
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={[detailStyles.sheet, { maxHeight: "86%" }]}><View style={detailStyles.handle} /><Text style={detailStyles.title}>إدارة التنزيلات</Text><FlatList data={history} keyExtractor={(item, index) => `${item.timestampMs}-${index}`} contentContainerStyle={{ gap: 10 }} ListHeaderComponent={<View style={{ gap: 12, marginBottom: 12 }}><View style={detailStyles.downloadSettingsCard}><View style={detailStyles.settingRow}><Switch value={settings?.completionNotificationsEnabled ?? false} disabled={!settings} onValueChange={(value) => { if (settings) void onUpdateSettings(value, settings.cellularSpeedLimitKbps); }} trackColor={{ false: "#C9D4E5", true: "#9DB9FA" }} thumbColor={settings?.completionNotificationsEnabled ? "#0B5FFF" : "#FFFFFF"} /><View style={{ flex: 1 }}><Text style={detailStyles.settingLabel}>إشعار عند اكتمال التنزيل</Text><Text style={detailStyles.settingDescription}>يظهر تنبيه محلي بعد التحقق من الملف وتثبيته.</Text></View></View><Text style={detailStyles.settingLabel}>حد السرعة على الشبكة الخلوية</Text><Text style={detailStyles.settingDescription}>{settings?.isCellularNetwork ? "الشبكة الحالية خلوية؛ سيطبق الحد المحدد." : "يُطبّق الحد تلقائيًا عند استخدام بيانات الهاتف فقط."}</Text><View style={detailStyles.limitOptions}><LimitChoice label="بدون حد" active={limit === 0} onPress={() => setLimit(0)} /><LimitChoice label="512 ك.ب/ث" active={limit === 512} onPress={() => setLimit(512)} /><LimitChoice label="1 م.ب/ث" active={limit === 1024} onPress={() => setLimit(1024)} /><LimitChoice label="2 م.ب/ث" active={limit === 2048} onPress={() => setLimit(2048)} /></View></View><View style={detailStyles.historyHeading}><Text style={detailStyles.metricsTitle}>سجل التنزيلات</Text>{history.length > 0 ? <Pressable accessibilityRole="button" onPress={onClearHistory} style={({ pressed }) => [detailStyles.historyClearButton, pressed && styles.pressed]}><Text style={detailStyles.historyClearText}>مسح السجل</Text></Pressable> : null}</View></View>} renderItem={({ item }) => <View style={detailStyles.historyCard}><View style={detailStyles.historyMeta}><Text style={detailStyles.historyMetaText}>{formatHistoryOutcome(item.outcome)}</Text><Text style={detailStyles.historyMetaText}>{formatHistoryDate(item.timestampMs)}</Text></View><Text style={detailStyles.catalogName}>{item.modelName}</Text><Text style={detailStyles.catalogDescription}>{formatBytes(item.bytes)} · {formatHistoryDuration(item.durationMs)} · {formatDownloadSpeed(item.averageBytesPerSecond)}</Text>{item.errorMessage ? <Text style={detailStyles.historyError}>{item.errorMessage}</Text> : null}</View>} ListEmptyComponent={<Text style={detailStyles.catalogDescription}>لا توجد عمليات تنزيل محفوظة بعد.</Text>} /><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
+}
+
+function LimitChoice({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [detailStyles.limitChoice, active && detailStyles.limitChoiceActive, pressed && styles.pressed]}><Text style={[detailStyles.limitChoiceText, active && detailStyles.limitChoiceTextActive]}>{label}</Text></Pressable>;
+}
+
 function formatKilobytes(value?: number) {
   return value && value > 0 ? `${(value / 1024).toFixed(1)} MB` : "غير متاح بعد";
 }
@@ -311,6 +369,18 @@ function formatRemainingTime(seconds: number) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.ceil((seconds % 3600) / 60);
   return `${hours} س ${minutes} د`;
+}
+
+function formatHistoryDuration(durationMs: number) {
+  return formatRemainingTime(Math.max(1, Math.round(durationMs / 1000)));
+}
+
+function formatHistoryDate(timestampMs: number) {
+  return new Date(timestampMs).toLocaleString("ar", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatHistoryOutcome(outcome: DownloadHistoryEntry["outcome"]) {
+  return outcome === "completed" ? "مكتمل" : outcome === "paused" ? "موقوف مؤقتًا" : "فشل";
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -340,6 +410,22 @@ const detailStyles = StyleSheet.create({
   catalogMetaText: { color: "#4A5B78", fontSize: 11, fontWeight: "700" },
   catalogButton: { minHeight: 42, borderRadius: 12, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", marginTop: 2 },
   catalogButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "800" },
+  downloadSettingsCard: { borderRadius: 16, backgroundColor: "#FFFFFF", borderColor: "#DCE5F0", borderWidth: 1, padding: 14, gap: 10 },
+  settingRow: { flexDirection: "row-reverse", alignItems: "center", gap: 12 },
+  settingLabel: { color: "#1C2941", fontSize: 14, fontWeight: "800", textAlign: "right" },
+  settingDescription: { color: "#58657D", fontSize: 12, lineHeight: 18, textAlign: "right" },
+  limitOptions: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 8 },
+  limitChoice: { minHeight: 34, paddingHorizontal: 10, borderRadius: 10, borderColor: "#C9D4E5", borderWidth: 1, backgroundColor: "#F7F9FC", alignItems: "center", justifyContent: "center" },
+  limitChoiceActive: { borderColor: "#0B5FFF", backgroundColor: "#E7EEFC" },
+  limitChoiceText: { color: "#4A5B78", fontSize: 11, fontWeight: "700" },
+  limitChoiceTextActive: { color: "#0B5FFF" },
+  historyHeading: { flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center" },
+  historyClearButton: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 9, backgroundColor: "#FDE8E8" },
+  historyClearText: { color: "#C62828", fontSize: 11, fontWeight: "800" },
+  historyCard: { borderRadius: 14, backgroundColor: "#FFFFFF", borderColor: "#DCE5F0", borderWidth: 1, padding: 13, gap: 6 },
+  historyMeta: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 10 },
+  historyMetaText: { color: "#58657D", fontSize: 11, fontWeight: "700" },
+  historyError: { color: "#C62828", fontSize: 12, textAlign: "right", lineHeight: 18 },
   row: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 12, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#DCE5F0" },
   label: { color: "#58657D", fontSize: 13, textAlign: "right" },
   value: { color: "#1C2941", fontSize: 13, fontWeight: "600", textAlign: "left", flex: 1 },
@@ -353,5 +439,5 @@ const detailStyles = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
-  setupLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18 }, noticeLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, paddingHorizontal: 24 }, logoMark: { width: 88, height: 88, borderRadius: 28, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", shadowColor: "#0B5FFF", shadowOpacity: 0.25, shadowRadius: 20, elevation: 7 }, logoGlyph: { color: "#FFFFFF", fontSize: 46, lineHeight: 56 }, title: { fontSize: 30, fontWeight: "800", color: "#152033", textAlign: "center" }, subtitle: { color: "#58657D", fontSize: 16, lineHeight: 24, textAlign: "center", maxWidth: 350 }, specCard: { width: "100%", borderRadius: 20, backgroundColor: "#FFFFFF", borderColor: "#DFE7F5", borderWidth: 1, padding: 18, gap: 7 }, specTitle: { color: "#152033", fontSize: 16, fontWeight: "700", textAlign: "right" }, specText: { color: "#58657D", fontSize: 13, lineHeight: 19, textAlign: "right" }, statusPanel: { width: "100%", padding: 16, borderRadius: 18, backgroundColor: "#ECF2FF", gap: 10 }, statusRow: { flexDirection: "row-reverse", justifyContent: "space-between" }, statusLabel: { color: "#22314D", fontWeight: "700" }, statusValue: { color: "#0B5FFF", fontWeight: "800" }, progressTrack: { backgroundColor: "#CDD9F4", height: 8, borderRadius: 4, overflow: "hidden" }, progressFill: { height: "100%", borderRadius: 4, backgroundColor: "#0B5FFF" }, statusDetails: { color: "#58657D", fontSize: 12, textAlign: "right" }, transferRow: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 10 }, transferMetric: { color: "#344764", fontSize: 12, fontWeight: "700" }, primaryButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, primaryButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, pauseButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#E7EEFC", borderWidth: 1, borderColor: "#AFC4F4", alignItems: "center", justifyContent: "center" }, pauseButtonText: { color: "#0B5FFF", fontWeight: "800", fontSize: 16 }, pendingButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#577DCB", flexDirection: "row-reverse", gap: 10, alignItems: "center", justifyContent: "center" }, pendingButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, errorText: { color: "#C62828", textAlign: "center", fontSize: 13, lineHeight: 20 }, header: { paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#F7F9FC", borderBottomColor: "#E1E8F2", borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center" }, headerTitle: { color: "#152033", fontSize: 18, fontWeight: "800", textAlign: "right" }, headerStatus: { color: "#16794B", fontSize: 12, marginTop: 3, textAlign: "right" }, headerAction: { paddingHorizontal: 13, paddingVertical: 9, borderRadius: 12, backgroundColor: "#E7EEFC" }, headerActionText: { color: "#0B5FFF", fontWeight: "700", fontSize: 13 }, messageList: { padding: 16, gap: 10 }, messageRow: { flexDirection: "row", width: "100%" }, userRow: { justifyContent: "flex-end" }, assistantRow: { justifyContent: "flex-start" }, messageBubble: { maxWidth: "84%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 11 }, userBubble: { backgroundColor: "#0B5FFF", borderBottomRightRadius: 4 }, assistantBubble: { backgroundColor: "#FFFFFF", borderColor: "#E0E7F0", borderWidth: 1, borderBottomLeftRadius: 4 }, messageText: { fontSize: 16, lineHeight: 24, textAlign: "right" }, userText: { color: "#FFFFFF" }, assistantText: { color: "#1C2941" }, composer: { flexDirection: "row-reverse", alignItems: "flex-end", gap: 10, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14, backgroundColor: "#F7F9FC", borderTopColor: "#E1E8F2", borderTopWidth: StyleSheet.hairlineWidth }, input: { flex: 1, minHeight: 48, maxHeight: 120, borderRadius: 18, paddingHorizontal: 15, paddingVertical: 11, backgroundColor: "#FFFFFF", borderColor: "#D6E0EE", borderWidth: 1, color: "#152033", fontSize: 16, lineHeight: 22 }, sendButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, sendButtonText: { color: "#FFFFFF", fontSize: 22, fontWeight: "800", lineHeight: 24 }, pressed: { transform: [{ scale: 0.97 }], opacity: 0.88 },
+  setupLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18 }, noticeLayout: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18, paddingHorizontal: 24 }, logoMark: { width: 88, height: 88, borderRadius: 28, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", shadowColor: "#0B5FFF", shadowOpacity: 0.25, shadowRadius: 20, elevation: 7 }, logoGlyph: { color: "#FFFFFF", fontSize: 46, lineHeight: 56 }, title: { fontSize: 30, fontWeight: "800", color: "#152033", textAlign: "center" }, subtitle: { color: "#58657D", fontSize: 16, lineHeight: 24, textAlign: "center", maxWidth: 350 }, specCard: { width: "100%", borderRadius: 20, backgroundColor: "#FFFFFF", borderColor: "#DFE7F5", borderWidth: 1, padding: 18, gap: 7 }, specTitle: { color: "#152033", fontSize: 16, fontWeight: "700", textAlign: "right" }, specText: { color: "#58657D", fontSize: 13, lineHeight: 19, textAlign: "right" }, statusPanel: { width: "100%", padding: 16, borderRadius: 18, backgroundColor: "#ECF2FF", gap: 10 }, statusRow: { flexDirection: "row-reverse", justifyContent: "space-between" }, statusLabel: { color: "#22314D", fontWeight: "700" }, statusValue: { color: "#0B5FFF", fontWeight: "800" }, progressTrack: { backgroundColor: "#CDD9F4", height: 8, borderRadius: 4, overflow: "hidden" }, progressFill: { height: "100%", borderRadius: 4, backgroundColor: "#0B5FFF" }, statusDetails: { color: "#58657D", fontSize: 12, textAlign: "right" }, transferRow: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 10 }, transferMetric: { color: "#344764", fontSize: 12, fontWeight: "700" }, primaryButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, primaryButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, pauseButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#E7EEFC", borderWidth: 1, borderColor: "#AFC4F4", alignItems: "center", justifyContent: "center" }, pauseButtonText: { color: "#0B5FFF", fontWeight: "800", fontSize: 16 }, pendingButton: { width: "100%", minHeight: 52, borderRadius: 16, backgroundColor: "#577DCB", flexDirection: "row-reverse", gap: 10, alignItems: "center", justifyContent: "center" }, pendingButtonText: { color: "#FFFFFF", fontWeight: "800", fontSize: 16 }, errorText: { color: "#C62828", textAlign: "center", fontSize: 13, lineHeight: 20 }, header: { paddingHorizontal: 20, paddingVertical: 14, backgroundColor: "#F7F9FC", borderBottomColor: "#E1E8F2", borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center" }, headerActions: { flexDirection: "row-reverse", gap: 8 }, headerTitle: { color: "#152033", fontSize: 18, fontWeight: "800", textAlign: "right" }, headerStatus: { color: "#16794B", fontSize: 12, marginTop: 3, textAlign: "right" }, headerAction: { paddingHorizontal: 13, paddingVertical: 9, borderRadius: 12, backgroundColor: "#E7EEFC" }, headerActionText: { color: "#0B5FFF", fontWeight: "700", fontSize: 13 }, messageList: { padding: 16, gap: 10 }, messageRow: { flexDirection: "row", width: "100%" }, userRow: { justifyContent: "flex-end" }, assistantRow: { justifyContent: "flex-start" }, messageBubble: { maxWidth: "84%", borderRadius: 18, paddingHorizontal: 14, paddingVertical: 11 }, userBubble: { backgroundColor: "#0B5FFF", borderBottomRightRadius: 4 }, assistantBubble: { backgroundColor: "#FFFFFF", borderColor: "#E0E7F0", borderWidth: 1, borderBottomLeftRadius: 4 }, messageText: { fontSize: 16, lineHeight: 24, textAlign: "right" }, userText: { color: "#FFFFFF" }, assistantText: { color: "#1C2941" }, composer: { flexDirection: "row-reverse", alignItems: "flex-end", gap: 10, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14, backgroundColor: "#F7F9FC", borderTopColor: "#E1E8F2", borderTopWidth: StyleSheet.hairlineWidth }, input: { flex: 1, minHeight: 48, maxHeight: 120, borderRadius: 18, paddingHorizontal: 15, paddingVertical: 11, backgroundColor: "#FFFFFF", borderColor: "#D6E0EE", borderWidth: 1, color: "#152033", fontSize: 16, lineHeight: 22 }, sendButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center" }, sendButtonText: { color: "#FFFFFF", fontSize: 22, fontWeight: "800", lineHeight: 24 }, pressed: { transform: [{ scale: 0.97 }], opacity: 0.88 },
 });

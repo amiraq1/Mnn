@@ -101,7 +101,7 @@ class GgufModelStore(private val context: Context) {
     }
   }
 
-  fun downloadRecommended(model: RecommendedGgufModel, onProgress: (Long, Long, String, String) -> Unit, pauseController: DownloadPauseController): GgufModel {
+  fun downloadRecommended(model: RecommendedGgufModel, onProgress: (Long, Long, String, String) -> Unit, pauseController: DownloadPauseController, rateLimiter: DownloadRateLimiter): GgufModel {
     ensureStorage(model.bytes)
     val destination = File(root, "${model.id}.gguf")
     if (destination.exists() && destination.length() == model.bytes && sha256(destination).equals(model.sha256, true)) {
@@ -142,6 +142,7 @@ class GgufModelStore(private val context: Context) {
               val count = input.read(buffer)
               if (count <= 0) break
               output.write(buffer, 0, count)
+              rateLimiter.throttle(count)
               downloaded += count
               onProgress(downloaded.coerceAtMost(model.bytes), model.bytes, model.fileName, "downloading")
             }

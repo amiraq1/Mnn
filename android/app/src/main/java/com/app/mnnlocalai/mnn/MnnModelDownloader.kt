@@ -38,6 +38,7 @@ class MnnModelDownloader(
   private val root: File,
   private val onProgress: (downloadedBytes: Long, totalBytes: Long, currentFile: String, phase: String) -> Unit,
   private val pauseController: DownloadPauseController,
+  private val rateLimiter: DownloadRateLimiter,
 ) {
   private val stateFile = File(root, "download-state.json")
 
@@ -118,6 +119,7 @@ class MnnModelDownloader(
               val count = input.read(buffer)
               if (count <= 0) break
               output.write(buffer, 0, count)
+              rateLimiter.throttle(count)
               downloadedForArtifact += count
               bytesSinceStateWrite += count
               val aggregate = completedBytes()
