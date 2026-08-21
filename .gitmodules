@@ -2,3 +2,6 @@
 	path = vendor/MNN
 	url = https://github.com/alibaba/MNN.git
 	ignore = dirty
+[submodule "vendor/llama.cpp"]
+	path = vendor/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git

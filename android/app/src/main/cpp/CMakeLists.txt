@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22.1)
 project(mnnlocalai)
 
 set(MNN_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../vendor/MNN")
+set(LLAMA_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../vendor/llama.cpp")
 set(MNN_BUILD_SHARED_LIBS ON CACHE BOOL "Build MNN as Android shared libraries" FORCE)
 set(MNN_SEP_BUILD ON CACHE BOOL "Build the LLM runtime as a separate shared library" FORCE)
 set(MNN_BUILD_LLM ON CACHE BOOL "Build the MNN LLM engine" FORCE)
@@ -17,11 +18,22 @@ set(MNN_USE_LOGCAT ON CACHE BOOL "Send MNN logging to Android logcat" FORCE)
 
 add_subdirectory("${MNN_ROOT}" "${CMAKE_BINARY_DIR}/mnn")
 
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Do not build llama.cpp tests in the mobile app" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Do not build llama.cpp examples in the mobile app" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "Do not build llama.cpp server in the mobile app" FORCE)
+set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "Do not build llama.cpp tools in the mobile app" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "OpenMP is not supported by this Android build" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "Use Android-safe runtime CPU feature detection" FORCE)
+set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "Keep the Android APK limited to arm64-v8a" FORCE)
+add_subdirectory("${LLAMA_ROOT}" "${CMAKE_BINARY_DIR}/llama")
+
 add_library(mnnlocalai SHARED mnn_local_ai_jni.cpp)
 target_include_directories(mnnlocalai PRIVATE
   "${MNN_ROOT}/include"
   "${MNN_ROOT}/transformers/llm/engine/include"
+  "${LLAMA_ROOT}/include"
+  "${LLAMA_ROOT}/ggml/include"
 )
 target_compile_features(mnnlocalai PRIVATE cxx_std_17)
 target_link_options(mnnlocalai PRIVATE "-Wl,-z,max-page-size=16384")
-target_link_libraries(mnnlocalai android log MNN llm)
+target_link_libraries(mnnlocalai android log MNN llm llama)

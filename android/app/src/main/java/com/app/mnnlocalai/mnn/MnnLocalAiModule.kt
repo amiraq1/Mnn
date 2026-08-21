@@ -16,6 +16,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   private val downloadRunning = AtomicBoolean(false)
   private val modelDirectory = File(appContext.filesDir, "models/qwen2.5-0.5b-mnn-q4")
   private val downloader = MnnModelDownloader(modelDirectory, ::emitDownloadProgress)
+  private val ggufStore = GgufModelStore(appContext)
   @Volatile private var latestGenerationMs = 0L
   @Volatile private var latestGeneratedSteps = 0L
   @Volatile private var latestGenerationStopped = false
@@ -35,15 +36,20 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   @ReactMethod
   fun getModelStatus(promise: Promise) {
     ioExecutor.execute {
+      val gguf = ggufStore.selected()
       val map = Arguments.createMap()
       val complete = downloader.isComplete()
       map.putString("state", when {
         downloadRunning.get() -> "downloading"
+        gguf != null -> "ready"
         complete -> "ready"
         else -> "missing"
       })
-      map.putDouble("downloadedBytes", downloader.completedBytes().toDouble())
-      map.putDouble("totalBytes", MnnModelRepository.totalBytes.toDouble())
+      map.putDouble("downloadedBytes", (gguf?.bytes ?: downloader.completedBytes()).toDouble())
+      map.putDouble("totalBytes", (gguf?.bytes ?: MnnModelRepository.totalBytes).toDouble())
+      map.putString("engine", if (gguf != null) "gguf" else "mnn")
+      map.putString("format", if (gguf != null) "GGUF v${gguf.version}" else "MNN")
+      map.putString("modelName", gguf?.name ?: "Qwen2.5 0.5B — MNN Q4")
       if (!nativeLibraryLoaded) map.putString("message", nativeLoadError)
       promise.resolve(map)
     }
@@ -76,18 +82,21 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
         promise.reject("MNN_RUNTIME_UNAVAILABLE", nativeLoadError)
         return@execute
       }
-      if (!downloader.isComplete()) {
+      val gguf = ggufStore.selected()
+      if (gguf == null && !downloader.isComplete()) {
         promise.reject("MODEL_NOT_READY", "لا توجد نسخة مكتملة ومتحقق منها من النموذج المحلي")
         return@execute
       }
       val started = System.nanoTime()
-      if (!nativeLoad(File(modelDirectory, "config.json").absolutePath)) {
-        promise.reject("MODEL_LOAD_FAILED", "تعذر تحميل نموذج MNN من التخزين المحلي")
+      val loaded = if (gguf != null) nativeLoadGguf(gguf.file.absolutePath) else nativeLoad(File(modelDirectory, "config.json").absolutePath)
+      if (!loaded) {
+        promise.reject("MODEL_LOAD_FAILED", if (gguf != null) "تعذر تحميل نموذج GGUF من التخزين المحلي" else "تعذر تحميل نموذج MNN من التخزين المحلي")
         return@execute
       }
       val loadMs = (System.nanoTime() - started) / 1_000_000
       val warmupStarted = System.nanoTime()
-      if (!nativeWarmup()) {
+      val warmed = if (gguf != null) nativeWarmupGguf() else nativeWarmup()
+      if (!warmed) {
         promise.reject("MODEL_WARMUP_FAILED", "تعذر تنفيذ warm-up للنموذج المحلي")
         return@execute
       }
@@ -104,7 +113,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       promise.reject("MNN_RUNTIME_UNAVAILABLE", nativeLoadError)
       return
     }
-    promise.resolve(nativeGenerate(prompt, runId))
+    promise.resolve(if (ggufStore.selected() != null) nativeGenerateGguf(prompt, runId) else nativeGenerate(prompt, runId))
   }
 
   @ReactMethod
@@ -125,8 +134,35 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
     }
     ioExecutor.execute {
       if (nativeLibraryLoaded) nativeRelease()
-      downloader.deleteAll()
+      if (ggufStore.selected() != null) ggufStore.clearSelected() else downloader.deleteAll()
       emit("MnnLocalAiModelDeleted", Arguments.createMap())
+    }
+  }
+
+  @ReactMethod
+  fun importGguf(uri: String, displayName: String, expectedBytes: Double, promise: Promise) {
+    ioExecutor.execute {
+      try {
+        if (nativeLibraryLoaded) nativeRelease()
+        val imported = ggufStore.importFromUri(uri, displayName, expectedBytes.toLong())
+        promise.resolve(Arguments.createMap().apply {
+          putString("id", imported.id)
+          putString("name", imported.name)
+          putDouble("bytes", imported.bytes.toDouble())
+          putString("format", "GGUF v${imported.version}")
+        })
+      } catch (error: Exception) {
+        promise.reject("GGUF_IMPORT_FAILED", error.message, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun selectMnnModel(promise: Promise) {
+    ioExecutor.execute {
+      if (nativeLibraryLoaded) nativeRelease()
+      ggufStore.clearSelected()
+      promise.resolve(null)
     }
   }
 
@@ -192,6 +228,9 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   private external fun nativeLoad(configPath: String): Boolean
   private external fun nativeWarmup(): Boolean
   private external fun nativeGenerate(prompt: String, runId: String): Boolean
+  private external fun nativeLoadGguf(path: String): Boolean
+  private external fun nativeWarmupGguf(): Boolean
+  private external fun nativeGenerateGguf(prompt: String, runId: String): Boolean
   private external fun nativeStopGeneration()
   private external fun nativeRelease()
 

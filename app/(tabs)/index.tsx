@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as DocumentPicker from "expo-document-picker";
 import {
   ActivityIndicator,
   Alert,
@@ -38,6 +39,8 @@ export default function HomeScreen() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
+  const [chatStarted, setChatStarted] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const activeRunId = useRef<string | null>(null);
 
   const percent = useMemo(() => {
@@ -120,6 +123,31 @@ export default function HomeScreen() {
     }
   }
 
+  async function importGguf() {
+    try {
+      const selection = await DocumentPicker.getDocumentAsync({ type: "*/*", copyToCacheDirectory: false, multiple: false });
+      if (selection.canceled) return;
+      const asset = selection.assets[0];
+      if (!asset.name.toLowerCase().endsWith(".gguf")) {
+        Alert.alert("صيغة غير مدعومة", "اختر ملف نموذج بامتداد .gguf. لا يمكن لمحرك GGUF فتح ملفات MNN أو ONNX.");
+        return;
+      }
+      if (asset.size && asset.size < 16 * 1024 * 1024) {
+        Alert.alert("ملف صغير جدًا", "لا يبدو الملف المحدد نموذج GGUF كاملاً.");
+        return;
+      }
+      setIsImporting(true);
+      setChatStarted(false);
+      setStatus((current) => ({ ...current, state: "loading", message: "يجري استيراد نموذج GGUF والتحقق من رأسه" }));
+      await mnnLocalAi.importGguf(asset.uri, asset.name, asset.size ?? 0);
+      await refreshStatus();
+    } catch (error) {
+      setStatus((current) => ({ ...current, state: "failed", message: error instanceof Error ? error.message : "تعذر استيراد نموذج GGUF" }));
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
   async function sendMessage() {
     const prompt = input.trim();
     if (!prompt || status.state !== "ready" || isGenerating) return;
@@ -143,7 +171,7 @@ export default function HomeScreen() {
   }
 
   function confirmDelete() {
-    Alert.alert("حذف النموذج المحلي", "سيحذف التطبيق ملفات النموذج التي تم التحقق منها وسيتطلب تنزيلها مجددًا.", [
+    Alert.alert("حذف النموذج المحلي", "سيحذف التطبيق النموذج المحدد من التخزين وسيستلزم استيراده أو تنزيله مجددًا.", [
       { text: "إلغاء", style: "cancel" },
       { text: "حذف", style: "destructive", onPress: () => { mnnLocalAi.deleteModel(); setMessages([]); void refreshStatus(); } },
     ]);
@@ -153,7 +181,7 @@ export default function HomeScreen() {
     return <NativeBuildNotice />;
   }
 
-  if (status.state !== "ready" || messages.length === 0) {
+  if (status.state !== "ready" || !chatStarted) {
     return (
       <ScreenContainer className="px-5 py-6" edges={["top", "bottom", "left", "right"]}>
         <View style={styles.setupLayout}>
@@ -161,13 +189,15 @@ export default function HomeScreen() {
           <Text style={styles.title}>MNN Local AI</Text>
           <Text style={styles.subtitle}>محادثة خاصة تعمل محليًا على جهازك بعد تنزيل النموذج.</Text>
           <View style={styles.specCard}>
-            <Text style={styles.specTitle}>{MODEL_SPEC.displayName}</Text>
-            <Text style={styles.specText}>تنزيل متدرج مع استئناف تلقائي والتحقق من SHA-256 لكل ملف.</Text>
-            <Text style={styles.specText}>المساحة التقريبية: {formatBytes(MODEL_TOTAL_BYTES)} · ذاكرة موصى بها: {MODEL_SPEC.recommendedRamGb}GB</Text>
+            <Text style={styles.specTitle}>{status.modelName ?? MODEL_SPEC.displayName}</Text>
+            <Text style={styles.specText}>{status.engine === "gguf" ? `${status.format ?? "GGUF"} مستورد محليًا؛ يُشغّل عبر llama.cpp دون رفع الملف إلى خادم.` : "تنزيل متدرج مع استئناف تلقائي والتحقق من SHA-256 لكل ملف."}</Text>
+            <Text style={styles.specText}>المساحة: {formatBytes(status.totalBytes || MODEL_TOTAL_BYTES)} · ذاكرة موصى بها: {status.engine === "gguf" ? "4GB+ بحسب النموذج" : `${MODEL_SPEC.recommendedRamGb}GB`}</Text>
           </View>
           <StatusPanel status={status} progress={progress} percent={percent} />
-          {status.state === "missing" || status.state === "failed" ? (
-            <PrimaryButton label={status.state === "failed" ? "إعادة محاولة التنزيل" : "تنزيل النموذج"} onPress={startDownload} />
+          {status.state === "ready" ? (
+            <PrimaryButton label="بدء محادثة" onPress={() => setChatStarted(true)} />
+          ) : status.state === "missing" || status.state === "failed" ? (
+            <View style={{ width: "100%", gap: 10 }}><PrimaryButton label={status.state === "failed" ? "إعادة محاولة تنزيل MNN" : "تنزيل نموذج MNN المدمج"} onPress={startDownload} /><Pressable accessibilityRole="button" accessibilityLabel="استيراد نموذج GGUF" disabled={isImporting} onPress={() => void importGguf()} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed, isImporting && { opacity: 0.6 }]}><Text style={detailStyles.secondaryButtonText}>{isImporting ? "يجري استيراد GGUF" : "استيراد نموذج GGUF"}</Text></Pressable></View>
           ) : status.state === "downloading" || status.state === "verifying" || status.state === "loading" || status.state === "warming" ? (
             <View style={styles.pendingButton}><ActivityIndicator color="#FFFFFF" /><Text style={styles.pendingButtonText}>يجري تجهيز النموذج</Text></View>
           ) : null}
@@ -180,7 +210,7 @@ export default function HomeScreen() {
   return (
     <ScreenContainer className="flex-1" edges={["top", "left", "right"]}>
       <View style={styles.header}>
-        <View><Text style={styles.headerTitle}>MNN Local AI</Text><Text style={styles.headerStatus}>جاهز محليًا {status.message ? `· ${status.message}` : ""}</Text></View>
+        <View><Text style={styles.headerTitle}>MNN Local AI</Text><Text style={styles.headerStatus}>جاهز عبر {status.engine === "gguf" ? "GGUF / llama.cpp" : "MNN"} {status.message ? `· ${status.message}` : ""}</Text></View>
         <Pressable accessibilityRole="button" accessibilityLabel="تفاصيل النموذج المحلي" onPress={() => { setShowDetails(true); void refreshMetrics(); }} style={({ pressed }) => [styles.headerAction, pressed && styles.pressed]}><Text style={styles.headerActionText}>إدارة</Text></Pressable>
       </View>
       <FlatList
@@ -216,7 +246,7 @@ function ModelDetailsSheet({ visible, status, metrics, onClose, onRecheck, onDel
   const stateLabel = status.state === "ready" ? "جاهز ومحلي" : status.state === "failed" ? "يتطلب معالجة" : "قيد التجهيز";
   const timing = metrics?.hasGeneration ? `${Math.round(metrics.generationMs)} ms${metrics.stopped ? " · تم الإيقاف" : ""}` : "أرسل رسالة لبدء القياس";
   const rate = metrics?.hasGeneration ? `${metrics.stepsPerSecond.toFixed(1)} خطوة/ث` : "—";
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={detailStyles.sheet}><View style={detailStyles.handle} /><Text style={detailStyles.title}>تفاصيل النموذج</Text><DetailRow label="النموذج" value={MODEL_SPEC.displayName} /><DetailRow label="الحالة" value={stateLabel} /><DetailRow label="التخزين المحلي" value={`${formatBytes(status.downloadedBytes)} من ${formatBytes(status.totalBytes)}`} /><DetailRow label="النزاهة" value="SHA-256 لكل ملف" /><View style={detailStyles.metricsBlock}><Text style={detailStyles.metricsTitle}>أداء آخر توليد</Text><DetailRow label="زمن التوليد" value={timing} /><DetailRow label="خطوات التوليد" value={metrics?.hasGeneration ? `${metrics.generatedSteps}` : "—"} /><DetailRow label="معدل التوليد" value={rate} /><DetailRow label="ذاكرة العملية (PSS)" value={formatKilobytes(metrics?.totalPssKb)} /><DetailRow label="ذاكرة MNN الأصلية" value={formatKilobytes(metrics?.nativePssKb)} /><DetailRow label="ذاكرة Java heap" value={formatKilobytes(metrics?.javaHeapUsedKb)} /></View><DetailRow label="المتطلبات" value={`Android ${MODEL_SPEC.minimumAndroidApi}+ · ${MODEL_SPEC.recommendedRamGb}GB RAM موصى بها`} /><View style={detailStyles.actions}><Pressable accessibilityRole="button" onPress={onRecheck} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>تحديث القياسات</Text></Pressable><Pressable accessibilityRole="button" onPress={() => { onClose(); onDelete(); }} style={({ pressed }) => [detailStyles.dangerButton, pressed && styles.pressed]}><Text style={detailStyles.dangerButtonText}>حذف النموذج</Text></Pressable></View><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={detailStyles.sheet}><View style={detailStyles.handle} /><Text style={detailStyles.title}>تفاصيل النموذج</Text><DetailRow label="النموذج" value={status.modelName ?? MODEL_SPEC.displayName} /><DetailRow label="المحرك والصيغة" value={status.engine === "gguf" ? "llama.cpp · GGUF" : "MNN · MNN LLM"} /><DetailRow label="الحالة" value={stateLabel} /><DetailRow label="التخزين المحلي" value={`${formatBytes(status.downloadedBytes)} من ${formatBytes(status.totalBytes)}`} /><DetailRow label="النزاهة" value={status.engine === "gguf" ? "فحص ترويسة GGUF عند الاستيراد" : "SHA-256 لكل ملف"} /><View style={detailStyles.metricsBlock}><Text style={detailStyles.metricsTitle}>أداء آخر توليد</Text><DetailRow label="زمن التوليد" value={timing} /><DetailRow label="خطوات التوليد" value={metrics?.hasGeneration ? `${metrics.generatedSteps}` : "—"} /><DetailRow label="معدل التوليد" value={rate} /><DetailRow label="ذاكرة العملية (PSS)" value={formatKilobytes(metrics?.totalPssKb)} /><DetailRow label="ذاكرة المحرك الأصلية" value={formatKilobytes(metrics?.nativePssKb)} /><DetailRow label="ذاكرة Java heap" value={formatKilobytes(metrics?.javaHeapUsedKb)} /></View><DetailRow label="التوافق" value={status.engine === "gguf" ? "GGUF للإصدار 2 أو 3 · Android 8.0+" : `Android ${MODEL_SPEC.minimumAndroidApi}+ · ${MODEL_SPEC.recommendedRamGb}GB RAM موصى بها`} /><View style={detailStyles.actions}><Pressable accessibilityRole="button" onPress={onRecheck} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>تحديث القياسات</Text></Pressable><Pressable accessibilityRole="button" onPress={() => { onClose(); onDelete(); }} style={({ pressed }) => [detailStyles.dangerButton, pressed && styles.pressed]}><Text style={detailStyles.dangerButtonText}>حذف النموذج</Text></Pressable></View><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
 }
 
 function formatKilobytes(value?: number) {
