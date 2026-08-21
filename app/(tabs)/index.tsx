@@ -16,7 +16,7 @@ import {
 
 import { ScreenContainer } from "@/components/screen-container";
 import { formatBytes, MODEL_SPEC, MODEL_TOTAL_BYTES } from "@/lib/model-spec";
-import { isNativeMnnAvailable, mnnLocalAi, type ModelStatus, type NativeDownloadProgress, type PerformanceMetrics } from "@/lib/mnn-local-ai";
+import { isNativeMnnAvailable, mnnLocalAi, type ModelStatus, type NativeDownloadProgress, type PerformanceMetrics, type RecommendedGgufModel } from "@/lib/mnn-local-ai";
 
 type ChatMessage = {
   id: string;
@@ -41,6 +41,8 @@ export default function HomeScreen() {
   const [metrics, setMetrics] = useState<PerformanceMetrics | null>(null);
   const [chatStarted, setChatStarted] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [recommendedModels, setRecommendedModels] = useState<RecommendedGgufModel[]>([]);
+  const [showCatalog, setShowCatalog] = useState(false);
   const activeRunId = useRef<string | null>(null);
 
   const percent = useMemo(() => {
@@ -52,6 +54,7 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!isNativeMnnAvailable) return;
     void refreshStatus();
+    void loadRecommendedModels();
     const subscriptions = [
       mnnLocalAi.onDownloadProgress((event) => {
         setProgress(event);
@@ -59,8 +62,7 @@ export default function HomeScreen() {
       }),
       mnnLocalAi.onDownloadCompleted(() => {
         setProgress(null);
-        setStatus((current) => ({ ...current, state: "ready", downloadedBytes: current.totalBytes }));
-        void initializeModel();
+        void refreshStatus();
       }),
       mnnLocalAi.onToken(({ runId, token }) => {
         if (activeRunId.current !== runId) return;
@@ -93,6 +95,14 @@ export default function HomeScreen() {
       if (next.state === "ready") await initializeModel();
     } catch (error) {
       setStatus((current) => ({ ...current, state: "failed", message: error instanceof Error ? error.message : "تعذر فحص حالة النموذج" }));
+    }
+  }
+
+  async function loadRecommendedModels() {
+    try {
+      setRecommendedModels(await mnnLocalAi.getRecommendedGgufModels());
+    } catch {
+      setRecommendedModels([]);
     }
   }
 
@@ -148,6 +158,14 @@ export default function HomeScreen() {
     }
   }
 
+  function startRecommendedDownload(model: RecommendedGgufModel) {
+    setChatStarted(false);
+    setShowCatalog(false);
+    setProgress(null);
+    setStatus({ state: "downloading", downloadedBytes: 0, totalBytes: model.bytes, engine: "gguf", format: model.format, modelName: model.displayName, message: "يجري تجهيز تنزيل متدرج مع التحقق من SHA-256" });
+    mnnLocalAi.startRecommendedGgufDownload(model.id);
+  }
+
   async function sendMessage() {
     const prompt = input.trim();
     if (!prompt || status.state !== "ready" || isGenerating) return;
@@ -197,11 +215,12 @@ export default function HomeScreen() {
           {status.state === "ready" ? (
             <PrimaryButton label="بدء محادثة" onPress={() => setChatStarted(true)} />
           ) : status.state === "missing" || status.state === "failed" ? (
-            <View style={{ width: "100%", gap: 10 }}><PrimaryButton label={status.state === "failed" ? "إعادة محاولة تنزيل MNN" : "تنزيل نموذج MNN المدمج"} onPress={startDownload} /><Pressable accessibilityRole="button" accessibilityLabel="استيراد نموذج GGUF" disabled={isImporting} onPress={() => void importGguf()} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed, isImporting && { opacity: 0.6 }]}><Text style={detailStyles.secondaryButtonText}>{isImporting ? "يجري استيراد GGUF" : "استيراد نموذج GGUF"}</Text></Pressable></View>
+            <View style={{ width: "100%", gap: 10 }}><PrimaryButton label={status.state === "failed" ? "إعادة محاولة تنزيل MNN" : "تنزيل نموذج MNN المدمج"} onPress={startDownload} /><Pressable accessibilityRole="button" accessibilityLabel="فتح كتالوج نماذج GGUF" onPress={() => setShowCatalog(true)} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>استعراض نماذج GGUF الموصى بها</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="استيراد نموذج GGUF" disabled={isImporting} onPress={() => void importGguf()} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed, isImporting && { opacity: 0.6 }]}><Text style={detailStyles.secondaryButtonText}>{isImporting ? "يجري استيراد GGUF" : "استيراد ملف GGUF من الجهاز"}</Text></Pressable></View>
           ) : status.state === "downloading" || status.state === "verifying" || status.state === "loading" || status.state === "warming" ? (
             <View style={styles.pendingButton}><ActivityIndicator color="#FFFFFF" /><Text style={styles.pendingButtonText}>يجري تجهيز النموذج</Text></View>
           ) : null}
           {status.state === "failed" ? <Text style={styles.errorText}>{status.message}</Text> : null}
+          <ModelCatalogSheet visible={showCatalog} models={recommendedModels} onClose={() => setShowCatalog(false)} onSelect={startRecommendedDownload} />
         </View>
       </ScreenContainer>
     );
@@ -249,6 +268,10 @@ function ModelDetailsSheet({ visible, status, metrics, onClose, onRecheck, onDel
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={detailStyles.sheet}><View style={detailStyles.handle} /><Text style={detailStyles.title}>تفاصيل النموذج</Text><DetailRow label="النموذج" value={status.modelName ?? MODEL_SPEC.displayName} /><DetailRow label="المحرك والصيغة" value={status.engine === "gguf" ? "llama.cpp · GGUF" : "MNN · MNN LLM"} /><DetailRow label="الحالة" value={stateLabel} /><DetailRow label="التخزين المحلي" value={`${formatBytes(status.downloadedBytes)} من ${formatBytes(status.totalBytes)}`} /><DetailRow label="النزاهة" value={status.engine === "gguf" ? "فحص ترويسة GGUF عند الاستيراد" : "SHA-256 لكل ملف"} /><View style={detailStyles.metricsBlock}><Text style={detailStyles.metricsTitle}>أداء آخر توليد</Text><DetailRow label="زمن التوليد" value={timing} /><DetailRow label="خطوات التوليد" value={metrics?.hasGeneration ? `${metrics.generatedSteps}` : "—"} /><DetailRow label="معدل التوليد" value={rate} /><DetailRow label="ذاكرة العملية (PSS)" value={formatKilobytes(metrics?.totalPssKb)} /><DetailRow label="ذاكرة المحرك الأصلية" value={formatKilobytes(metrics?.nativePssKb)} /><DetailRow label="ذاكرة Java heap" value={formatKilobytes(metrics?.javaHeapUsedKb)} /></View><DetailRow label="التوافق" value={status.engine === "gguf" ? "GGUF للإصدار 2 أو 3 · Android 8.0+" : `Android ${MODEL_SPEC.minimumAndroidApi}+ · ${MODEL_SPEC.recommendedRamGb}GB RAM موصى بها`} /><View style={detailStyles.actions}><Pressable accessibilityRole="button" onPress={onRecheck} style={({ pressed }) => [detailStyles.secondaryButton, pressed && styles.pressed]}><Text style={detailStyles.secondaryButtonText}>تحديث القياسات</Text></Pressable><Pressable accessibilityRole="button" onPress={() => { onClose(); onDelete(); }} style={({ pressed }) => [detailStyles.dangerButton, pressed && styles.pressed]}><Text style={detailStyles.dangerButtonText}>حذف النموذج</Text></Pressable></View><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
 }
 
+function ModelCatalogSheet({ visible, models, onClose, onSelect }: { visible: boolean; models: RecommendedGgufModel[]; onClose: () => void; onSelect: (model: RecommendedGgufModel) => void }) {
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><View style={detailStyles.backdrop}><View style={[detailStyles.sheet, { maxHeight: "82%" }]}><View style={detailStyles.handle} /><Text style={detailStyles.title}>نماذج GGUF الموصى بها</Text><Text style={detailStyles.catalogIntro}>تُنزل النماذج إلى جهازك مع استئناف النقل والتحقق من SHA-256. اختر نموذجًا يناسب ذاكرة هاتفك.</Text><FlatList data={models} keyExtractor={(item) => item.id} contentContainerStyle={{ gap: 10 }} renderItem={({ item }) => <View style={detailStyles.catalogCard}><Text style={detailStyles.catalogName}>{item.displayName}</Text><Text style={detailStyles.catalogDescription}>{item.description}</Text><View style={detailStyles.catalogMeta}><Text style={detailStyles.catalogMetaText}>{formatBytes(item.bytes)}</Text><Text style={detailStyles.catalogMetaText}>{item.format} · RAM {item.recommendedRamGb}GB+</Text></View><Pressable accessibilityRole="button" onPress={() => onSelect(item)} style={({ pressed }) => [detailStyles.catalogButton, pressed && styles.pressed]}><Text style={detailStyles.catalogButtonText}>تنزيل واستخدام هذا النموذج</Text></Pressable></View>} ListEmptyComponent={<Text style={detailStyles.catalogDescription}>يجري تحميل الكتالوج…</Text>} /><Pressable accessibilityRole="button" onPress={onClose} style={({ pressed }) => [detailStyles.closeButton, pressed && styles.pressed]}><Text style={detailStyles.closeButtonText}>إغلاق</Text></Pressable></View></View></Modal>;
+}
+
 function formatKilobytes(value?: number) {
   return value && value > 0 ? `${(value / 1024).toFixed(1)} MB` : "غير متاح بعد";
 }
@@ -272,6 +295,14 @@ const detailStyles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: "800", color: "#152033", textAlign: "right", marginBottom: 4 },
   metricsBlock: { backgroundColor: "#ECF2FF", borderRadius: 16, paddingHorizontal: 14, paddingVertical: 4, marginVertical: 2 },
   metricsTitle: { color: "#0B5FFF", fontSize: 14, fontWeight: "800", textAlign: "right", marginTop: 8 },
+  catalogIntro: { color: "#58657D", fontSize: 13, lineHeight: 19, textAlign: "right" },
+  catalogCard: { borderRadius: 16, backgroundColor: "#FFFFFF", borderColor: "#DCE5F0", borderWidth: 1, padding: 14, gap: 8 },
+  catalogName: { color: "#152033", fontSize: 15, fontWeight: "800", textAlign: "right" },
+  catalogDescription: { color: "#58657D", fontSize: 12, lineHeight: 18, textAlign: "right" },
+  catalogMeta: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 8 },
+  catalogMetaText: { color: "#4A5B78", fontSize: 11, fontWeight: "700" },
+  catalogButton: { minHeight: 42, borderRadius: 12, backgroundColor: "#0B5FFF", alignItems: "center", justifyContent: "center", marginTop: 2 },
+  catalogButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "800" },
   row: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 12, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#DCE5F0" },
   label: { color: "#58657D", fontSize: 13, textAlign: "right" },
   value: { color: "#1C2941", fontSize: 13, fontWeight: "600", textAlign: "left", flex: 1 },

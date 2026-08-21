@@ -19,6 +19,15 @@ export type NativeDownloadProgress = {
   phase: "downloading" | "verifying";
 };
 
+export type RecommendedGgufModel = {
+  id: string;
+  displayName: string;
+  description: string;
+  format: string;
+  bytes: number;
+  recommendedRamGb: number;
+};
+
 export type PerformanceMetrics = {
   hasGeneration: boolean;
   generationMs: number;
@@ -41,6 +50,8 @@ type MnnNativeModule = {
   deleteModel(): void;
   importGguf(uri: string, displayName: string, expectedBytes: number): Promise<{ id: string; name: string; bytes: number; format: string }>;
   selectMnnModel(): Promise<void>;
+  getRecommendedGgufModels(): Promise<RecommendedGgufModel[]>;
+  startRecommendedGgufDownload(modelId: string): void;
 };
 
 const nativeModule = NativeModules.MnnLocalAi as MnnNativeModule | undefined;
@@ -65,6 +76,8 @@ export const mnnLocalAi = {
   deleteModel: () => requireNativeModule().deleteModel(),
   importGguf: (uri: string, displayName: string, expectedBytes: number) => requireNativeModule().importGguf(uri, displayName, expectedBytes),
   selectMnnModel: () => requireNativeModule().selectMnnModel(),
+  getRecommendedGgufModels: () => requireNativeModule().getRecommendedGgufModels(),
+  startRecommendedGgufDownload: (modelId: string) => requireNativeModule().startRecommendedGgufDownload(modelId),
   onDownloadProgress(listener: (progress: NativeDownloadProgress) => void) {
     return DeviceEventEmitter.addListener("MnnLocalAiDownloadProgress", listener);
   },

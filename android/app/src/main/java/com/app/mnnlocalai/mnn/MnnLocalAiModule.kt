@@ -17,6 +17,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   private val modelDirectory = File(appContext.filesDir, "models/qwen2.5-0.5b-mnn-q4")
   private val downloader = MnnModelDownloader(modelDirectory, ::emitDownloadProgress)
   private val ggufStore = GgufModelStore(appContext)
+  @Volatile private var activeGgufDownload: RecommendedGgufModel? = null
   @Volatile private var latestGenerationMs = 0L
   @Volatile private var latestGeneratedSteps = 0L
   @Volatile private var latestGenerationStopped = false
@@ -37,6 +38,7 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
   fun getModelStatus(promise: Promise) {
     ioExecutor.execute {
       val gguf = ggufStore.selected()
+      val activeCatalogModel = activeGgufDownload
       val map = Arguments.createMap()
       val complete = downloader.isComplete()
       map.putString("state", when {
@@ -45,11 +47,11 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
         complete -> "ready"
         else -> "missing"
       })
-      map.putDouble("downloadedBytes", (gguf?.bytes ?: downloader.completedBytes()).toDouble())
-      map.putDouble("totalBytes", (gguf?.bytes ?: MnnModelRepository.totalBytes).toDouble())
-      map.putString("engine", if (gguf != null) "gguf" else "mnn")
-      map.putString("format", if (gguf != null) "GGUF v${gguf.version}" else "MNN")
-      map.putString("modelName", gguf?.name ?: "Qwen2.5 0.5B — MNN Q4")
+      map.putDouble("downloadedBytes", (if (activeCatalogModel != null) ggufStore.catalogPartialBytes(activeCatalogModel) else gguf?.bytes ?: downloader.completedBytes()).toDouble())
+      map.putDouble("totalBytes", (activeCatalogModel?.bytes ?: gguf?.bytes ?: MnnModelRepository.totalBytes).toDouble())
+      map.putString("engine", if (activeCatalogModel != null || gguf != null) "gguf" else "mnn")
+      map.putString("format", if (activeCatalogModel != null) "GGUF" else if (gguf != null) "GGUF v${gguf.version}" else "MNN")
+      map.putString("modelName", activeCatalogModel?.displayName ?: gguf?.name ?: "Qwen2.5 0.5B — MNN Q4")
       if (!nativeLibraryLoaded) map.putString("message", nativeLoadError)
       promise.resolve(map)
     }
@@ -70,6 +72,45 @@ class MnnLocalAiModule(private val appContext: ReactApplicationContext) : ReactC
       } catch (error: Exception) {
         emitError(null, error.message ?: "تعذر تنزيل النموذج")
       } finally {
+        downloadRunning.set(false)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun getRecommendedGgufModels(promise: Promise) {
+    val models = Arguments.createArray()
+    RecommendedGgufCatalog.models.forEach { model ->
+      models.pushMap(Arguments.createMap().apply {
+        putString("id", model.id)
+        putString("displayName", model.displayName)
+        putString("description", model.description)
+        putString("format", "GGUF · Q4_K_M")
+        putDouble("bytes", model.bytes.toDouble())
+        putDouble("recommendedRamGb", model.recommendedRamGb.toDouble())
+      })
+    }
+    promise.resolve(models)
+  }
+
+  @ReactMethod
+  fun startRecommendedGgufDownload(modelId: String) {
+    val model = RecommendedGgufCatalog.byId(modelId)
+    if (model == null) {
+      emitError(null, "لا يوجد نموذج GGUF مطابق في الكتالوج")
+      return
+    }
+    if (!downloadRunning.compareAndSet(false, true)) return
+    activeGgufDownload = model
+    ioExecutor.execute {
+      try {
+        if (nativeLibraryLoaded) nativeRelease()
+        ggufStore.downloadRecommended(model, ::emitDownloadProgress)
+        emit("MnnLocalAiDownloadCompleted", Arguments.createMap())
+      } catch (error: Exception) {
+        emitError(null, error.message ?: "تعذر تنزيل نموذج GGUF")
+      } finally {
+        activeGgufDownload = null
         downloadRunning.set(false)
       }
     }
